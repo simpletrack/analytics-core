@@ -3,8 +3,8 @@ services:
     image: redis/redis-stack:latest
     container_name: analytics-core-redis
     ports:
-      - "6379:6379"
-      - "8001:8001"
+      - "${ANALYTICS_CORE_REDIS_PORT:-26379}:6379"
+      - "${ANALYTICS_CORE_REDIS_INSIGHT_PORT:-28001}:8001"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -20,7 +20,7 @@ services:
       MYSQL_USER: analytics_core
       MYSQL_PASSWORD: analytics_core
     ports:
-      - "3306:3306"
+      - "${ANALYTICS_CORE_MYSQL_PORT:-23306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -38,8 +38,8 @@ services:
       CLICKHOUSE_PASSWORD: analytics_core
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "${ANALYTICS_CORE_CLICKHOUSE_HTTP_PORT:-28123}:8123"
+      - "${ANALYTICS_CORE_CLICKHOUSE_NATIVE_PORT:-29000}:9000"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     ulimits:

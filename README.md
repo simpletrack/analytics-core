@@ -82,14 +82,19 @@ docker compose up -d
 
 The compose file exposes:
 
-- Redis Stack: `localhost:6379`, RedisInsight: `http://localhost:8001`
-- MySQL: `localhost:3306`, database/user/password `analytics_core`
-- ClickHouse HTTP: `http://localhost:8123`, native TCP: `localhost:9000`, database/user/password `analytics_core`
+- Redis Stack: `localhost:26379`, RedisInsight: `http://localhost:28001`
+- MySQL: `localhost:23306`, database/user/password `analytics_core`
+- ClickHouse HTTP: `http://localhost:28123`, native TCP: `localhost:29000`, database/user/password `analytics_core`
+
+Ports can be overridden with `ANALYTICS_CORE_REDIS_PORT`,
+`ANALYTICS_CORE_REDIS_INSIGHT_PORT`, `ANALYTICS_CORE_MYSQL_PORT`,
+`ANALYTICS_CORE_CLICKHOUSE_HTTP_PORT`, and
+`ANALYTICS_CORE_CLICKHOUSE_NATIVE_PORT`.
 
 Run Redis Stream integration tests against the local Redis container:
 
 ```powershell
-$env:ANALYTICS_CORE_REDIS_ADDR='localhost:6379'
+$env:ANALYTICS_CORE_REDIS_ADDR='127.0.0.1:26379'
 go test ./internal/eventbus/redisstream
 ```
 
