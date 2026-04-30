@@ -64,6 +64,35 @@ func TestProcessorReturnsStoreErrorsForRetry(t *testing.T) {
 	}
 }
 
+func TestProcessorRunSubscribesAndWritesEvents(t *testing.T) {
+	store := newMemoryStore()
+	bus := &scriptedBus{
+		messages: []eventbus.Message{
+			{ID: "message_1", Envelope: contracts.EventEnvelope{ID: "evt_1"}},
+			{ID: "message_2", Envelope: contracts.EventEnvelope{ID: "evt_2"}},
+		},
+	}
+
+	processor, err := NewProcessor(
+		bus,
+		eventbus.ConsumerGroup{Name: "ingestion", Consumer: "test"},
+		store,
+	)
+	if err != nil {
+		t.Fatalf("new processor failed: %v", err)
+	}
+
+	if err := processor.Run(context.Background()); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if got := store.inserted; got != 2 {
+		t.Fatalf("expected two inserted events, got %d", got)
+	}
+	if got := bus.group.Name; got != "ingestion" {
+		t.Fatalf("expected ingestion group, got %q", got)
+	}
+}
+
 type memoryStore struct {
 	err      error               // err forces WriteEvent to fail for retry tests
 	inserted int                 // inserted records unique events written by the processor
@@ -97,5 +126,28 @@ func (b *noopBus) Publish(context.Context, contracts.EventEnvelope) error {
 }
 
 func (b *noopBus) Subscribe(context.Context, eventbus.ConsumerGroup, eventbus.Handler) error {
+	return nil
+}
+
+type scriptedBus struct {
+	group    eventbus.ConsumerGroup // group stores the subscription identity passed by Processor.Run
+	messages []eventbus.Message     // messages are delivered synchronously to the handler
+}
+
+func (b *scriptedBus) Publish(context.Context, contracts.EventEnvelope) error {
+	return nil
+}
+
+func (b *scriptedBus) Subscribe(ctx context.Context, group eventbus.ConsumerGroup, handler eventbus.Handler) error {
+	// Capture the worker identity so the test proves Run wires the configured
+	// consumer group into the EventBus subscription.
+	b.group = group
+	// Deliver messages synchronously to keep the test deterministic while still
+	// exercising Processor.Run instead of the private handler directly.
+	for _, msg := range b.messages {
+		if err := handler(ctx, msg); err != nil {
+			return err
+		}
+	}
 	return nil
 }

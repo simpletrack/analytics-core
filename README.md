@@ -30,6 +30,7 @@ upstream applications.
 - Redis Stream attempts are read from consumer group pending metadata, not from local process memory.
 - `MaxAttempts` with `DeadLetterStream` moves exhausted messages to a dead-letter stream and acknowledges the original message.
 - Ingestion treats duplicate event writes as successful processing, so at-least-once delivery does not create duplicate stored events.
+- `ingestion.Processor` is the P1 worker boundary: queue adapters supply messages, and `storage.EventWriter` owns durable append plus idempotency.
 
 ## HTTP API
 
