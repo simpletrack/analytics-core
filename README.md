@@ -11,6 +11,7 @@ upstream applications.
 
 - Standard event envelope.
 - Collect request validation and event normalization.
+- Collect handler that publishes normalized envelopes to an EventBus.
 - EventBus abstraction.
 - Direct in-process bus for tests and local demos.
 - Redis Stream bus for the first deployable queue path.
