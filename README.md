@@ -72,3 +72,30 @@ $env:HTTPS_PROXY='http://localhost:7897'
 $env:GOPROXY='https://proxy.golang.org,direct'
 ```
 
+## Local Runtime Dependencies
+
+Start Redis Stack, MySQL, and ClickHouse for integration work:
+
+```powershell
+docker compose up -d
+```
+
+The compose file exposes:
+
+- Redis Stack: `localhost:6379`, RedisInsight: `http://localhost:8001`
+- MySQL: `localhost:3306`, database/user/password `analytics_core`
+- ClickHouse HTTP: `http://localhost:8123`, native TCP: `localhost:9000`, database/user/password `analytics_core`
+
+Run Redis Stream integration tests against the local Redis container:
+
+```powershell
+$env:ANALYTICS_CORE_REDIS_ADDR='localhost:6379'
+go test ./internal/eventbus/redisstream
+```
+
+Stop local dependencies:
+
+```powershell
+docker compose down
+```
+
