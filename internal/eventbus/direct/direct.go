@@ -14,10 +14,12 @@ type Bus struct {
 	handlers []eventbus.Handler
 }
 
+// New creates an in-process event bus.
 func New() *Bus {
 	return &Bus{}
 }
 
+// Publish synchronously delivers envelope to all registered handlers.
 func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) error {
 	b.mu.RLock()
 	handlers := append([]eventbus.Handler(nil), b.handlers...)
@@ -39,6 +41,7 @@ func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) err
 	return nil
 }
 
+// Subscribe registers handler until ctx is cancelled.
 func (b *Bus) Subscribe(ctx context.Context, _ eventbus.ConsumerGroup, handler eventbus.Handler) error {
 	b.mu.Lock()
 	b.handlers = append(b.handlers, handler)

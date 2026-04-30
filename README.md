@@ -15,3 +15,11 @@ upstream applications.
 - Redis Stream bus for the first deployable queue path.
 - Kafka adapter boundary reserved for high-throughput deployments.
 
+## Queue Semantics
+
+- Consumers acknowledge messages only after storage writes succeed.
+- Failed messages stay pending and are retried before new messages are read.
+- Redis Stream attempts are read from consumer group pending metadata, not from local process memory.
+- `MaxAttempts` with `DeadLetterStream` moves exhausted messages to a dead-letter stream and acknowledges the original message.
+- Ingestion treats duplicate event writes as successful processing, so at-least-once delivery does not create duplicate stored events.
+

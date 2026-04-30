@@ -8,17 +8,17 @@ import (
 
 // ConsumerGroup identifies a logical consumer group for an EventBus subscription.
 type ConsumerGroup struct {
-	Name     string
-	Consumer string
+	Name     string // consumer group name shared by one logical pipeline
+	Consumer string // concrete consumer instance name inside the group
 }
 
 // Message wraps an event with queue metadata and acknowledgement hooks.
 type Message struct {
-	ID       string
-	Attempt  int
-	Envelope contracts.EventEnvelope
-	Ack      func(context.Context) error
-	Nack     func(context.Context, error) error
+	ID       string                             // queue-native message identifier
+	Attempt  int                                // one-based delivery attempt observed by the adapter
+	Envelope contracts.EventEnvelope            // validated analytics event payload
+	Ack      func(context.Context) error        // acknowledges successful processing
+	Nack     func(context.Context, error) error // records failed processing
 }
 
 // Handler processes one event message. Returning nil means the message can be acknowledged.
