@@ -21,6 +21,13 @@ type Table struct {
 	Physical string // Physical is the physical table name used only inside storage adapters
 }
 
+// RoutingKey identifies the tenant/project/source table routing boundary.
+type RoutingKey struct {
+	TenantID  string // TenantID is the tenant boundary key
+	ProjectID string // ProjectID is the project or website boundary key
+	SourceID  string // SourceID is the source boundary key inside the project
+}
+
 // TableRouter maps an event envelope to a physical ClickHouse table.
 type TableRouter struct {
 	prefix string // prefix is the safe physical table prefix for routed event tables
@@ -40,22 +47,35 @@ func NewTableRouter(prefix string) (*TableRouter, error) {
 
 // Route returns the logical and physical table for envelope.
 func (r *TableRouter) Route(envelope contracts.EventEnvelope) (Table, error) {
+	// Convert the write envelope to the same routing key used by read queries
+	// so ingestion and analysis cannot drift into different table strategies.
+	return r.RouteKey(RoutingKey{
+		TenantID:  envelope.TenantID,
+		ProjectID: envelope.ProjectID,
+		SourceID:  envelope.SourceID,
+	})
+}
+
+// RouteKey returns the logical and physical table for a routing key.
+func (r *TableRouter) RouteKey(key RoutingKey) (Table, error) {
 	if r == nil {
 		return Table{}, errors.New("table router is required")
 	}
-	if envelope.TenantID == "" {
+	if key.TenantID == "" {
 		return Table{}, errors.New("tenant_id is required")
 	}
-	if envelope.ProjectID == "" {
+	if key.ProjectID == "" {
 		return Table{}, errors.New("project_id is required")
 	}
-	if envelope.SourceID == "" {
+	if key.SourceID == "" {
 		return Table{}, errors.New("source_id is required")
 	}
 
+	// Only hashed routing parts reach the physical table name so raw tenant,
+	// project, and source identifiers never leak into ClickHouse identifiers.
 	return Table{
 		Logical:  defaultLogicalTable,
-		Physical: fmt.Sprintf("%s_%s_%s_%s", r.prefix, shortHash(envelope.TenantID), shortHash(envelope.ProjectID), shortHash(envelope.SourceID)),
+		Physical: fmt.Sprintf("%s_%s_%s_%s", r.prefix, shortHash(key.TenantID), shortHash(key.ProjectID), shortHash(key.SourceID)),
 	}, nil
 }
 
