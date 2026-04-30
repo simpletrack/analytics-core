@@ -28,31 +28,6 @@ var eventInsertColumns = []string{
 	"source",
 }
 
-// EventWriteGuard starts and finalizes the durable idempotency record for an event.
-//
-// The ClickHouse event table is optimized for append-heavy analytics writes, so
-// exact duplicate prevention belongs in a small status/checkpoint store outside
-// the hot event table. The guard owns that store and lets BatchWriter skip an
-// already accepted event before it prepares a ClickHouse batch.
-type EventWriteGuard interface {
-	// StartEventWrite claims the event id before the ClickHouse append starts.
-	StartEventWrite(context.Context, contracts.EventEnvelope) (EventWriteClaim, error)
-}
-
-// EventWriteClaim is the per-event idempotency claim returned by EventWriteGuard.
-//
-// A claim should be keyed by tenant_id, project_id, source_id, and event_id. It
-// may represent a new write, an in-progress write that this consumer owns, or an
-// already inserted duplicate that must be treated as a successful no-op.
-type EventWriteClaim interface {
-	// AlreadyInserted reports whether the event was previously committed.
-	AlreadyInserted() bool
-	// Commit marks the claimed event as durably inserted after ClickHouse send succeeds.
-	Commit(context.Context) error
-	// Rollback releases or records the failed claim when ClickHouse send fails.
-	Rollback(context.Context, error) error
-}
-
 // BatchWriterOption customizes BatchWriter dependencies without exposing the
 // ClickHouse driver or status-store implementation to ingestion.
 type BatchWriterOption func(*BatchWriter)
@@ -61,7 +36,7 @@ type BatchWriterOption func(*BatchWriter)
 //
 // Production at-least-once consumers should provide this option so repeated
 // delivery of the same event_id does not append a second analytics row.
-func WithEventWriteGuard(guard EventWriteGuard) BatchWriterOption {
+func WithEventWriteGuard(guard storage.EventWriteGuard) BatchWriterOption {
 	return func(writer *BatchWriter) {
 		writer.guard = guard
 	}
@@ -74,9 +49,9 @@ func WithEventWriteGuard(guard EventWriteGuard) BatchWriterOption {
 // analysis code should depend on storage.EventWriter instead of importing the
 // ClickHouse driver directly.
 type BatchWriter struct {
-	router       *TableRouter     // router resolves tenant/project/source to a safe physical table
-	prepareBatch prepareBatchFunc // prepareBatch opens one native ClickHouse batch for an insert query
-	guard        EventWriteGuard  // guard provides durable duplicate protection around at-least-once delivery
+	router       *TableRouter            // router resolves tenant/project/source to a safe physical table
+	prepareBatch prepareBatchFunc        // prepareBatch opens one native ClickHouse batch for an insert query
+	guard        storage.EventWriteGuard // guard provides durable duplicate protection around at-least-once delivery
 }
 
 type nativeBatch interface {
@@ -97,6 +72,8 @@ func NewBatchWriter(conn driver.Conn, router *TableRouter, opts ...BatchWriterOp
 		return nil, errors.New("clickhouse connection is required")
 	}
 
+	// Adapt the concrete clickhouse-go/v2 connection to the narrow preparer
+	// function used by tests and by the storage boundary.
 	return newBatchWriterWithPreparer(router, func(ctx context.Context, query string) (nativeBatch, error) {
 		return conn.PrepareBatch(ctx, query)
 	}, opts...)
@@ -110,6 +87,8 @@ func newBatchWriterWithPreparer(router *TableRouter, prepare prepareBatchFunc, o
 		return nil, errors.New("clickhouse batch preparer is required")
 	}
 
+	// Keep optional dependencies behind functional options so ingestion never
+	// needs to know which status store or ClickHouse connection is in use.
 	writer := &BatchWriter{
 		router:       router,
 		prepareBatch: prepare,
@@ -136,6 +115,8 @@ func (w *BatchWriter) WriteEvent(ctx context.Context, envelope contracts.EventEn
 		return storage.WriteResult{}, errors.New("event_id is required")
 	}
 
+	// Claim the event before touching ClickHouse so at-least-once queue replay
+	// can become an explicit duplicate no-op instead of a second event row.
 	claim, err := w.startEventWrite(ctx, envelope)
 	if err != nil {
 		return storage.WriteResult{}, err
@@ -144,10 +125,14 @@ func (w *BatchWriter) WriteEvent(ctx context.Context, envelope contracts.EventEn
 		return storage.WriteResult{Inserted: false}, nil
 	}
 
+	// Append the event only after the idempotency claim succeeds; append
+	// failures must roll the claim back so the queue can retry cleanly.
 	if err := w.writeClaimedEvent(ctx, envelope); err != nil {
 		return storage.WriteResult{}, w.rollbackEventWrite(ctx, claim, err)
 	}
 	if claim != nil {
+		// Commit happens after ClickHouse Send because the status row is the
+		// durable signal used by later duplicate deliveries.
 		if err := claim.Commit(ctx); err != nil {
 			return storage.WriteResult{}, err
 		}
@@ -155,8 +140,10 @@ func (w *BatchWriter) WriteEvent(ctx context.Context, envelope contracts.EventEn
 	return storage.WriteResult{Inserted: true}, nil
 }
 
-func (w *BatchWriter) startEventWrite(ctx context.Context, envelope contracts.EventEnvelope) (EventWriteClaim, error) {
+func (w *BatchWriter) startEventWrite(ctx context.Context, envelope contracts.EventEnvelope) (storage.EventWriteClaim, error) {
 	if w.guard == nil {
+		// Tests and low-risk demos may run without durable duplicate tracking,
+		// but production consumers should always configure a guard.
 		return nil, nil
 	}
 
@@ -171,22 +158,30 @@ func (w *BatchWriter) startEventWrite(ctx context.Context, envelope contracts.Ev
 }
 
 func (w *BatchWriter) writeClaimedEvent(ctx context.Context, envelope contracts.EventEnvelope) error {
+	// Table routing is kept inside the ClickHouse adapter so dynamic physical
+	// table names never leak into collect, ingestion, or analysis code.
 	table, err := w.router.Route(envelope)
 	if err != nil {
 		return err
 	}
 
+	// PrepareBatch uses the native ClickHouse protocol and is the hot-path
+	// alternative to ORM CreateInBatches for event details.
 	query := buildEventInsertStatement(table.Physical)
 	batch, err := w.prepareBatch(ctx, query)
 	if err != nil {
 		return err
 	}
 
+	// Marshal event maps before Append so malformed property values abort the
+	// batch without sending a partial row.
 	values, err := eventInsertValues(envelope)
 	if err != nil {
 		_ = batch.Abort()
 		return err
 	}
+	// Append and Send are separated because clickhouse-go can surface schema or
+	// type issues before network flush; both failures must abort driver state.
 	if err := batch.Append(values...); err != nil {
 		_ = batch.Abort()
 		return err
@@ -198,10 +193,12 @@ func (w *BatchWriter) writeClaimedEvent(ctx context.Context, envelope contracts.
 	return nil
 }
 
-func (w *BatchWriter) rollbackEventWrite(ctx context.Context, claim EventWriteClaim, cause error) error {
+func (w *BatchWriter) rollbackEventWrite(ctx context.Context, claim storage.EventWriteClaim, cause error) error {
 	if claim == nil {
 		return cause
 	}
+	// Join rollback errors with the original append error so the queue retry
+	// path keeps the root cause while still exposing status-store failure.
 	if err := claim.Rollback(ctx, cause); err != nil {
 		return errors.Join(cause, err)
 	}
@@ -209,6 +206,8 @@ func (w *BatchWriter) rollbackEventWrite(ctx context.Context, claim EventWriteCl
 }
 
 func eventInsertValues(envelope contracts.EventEnvelope) ([]any, error) {
+	// Store open-ended properties as JSON strings for the first write path;
+	// typed property indexing can be added later behind metadata migrations.
 	properties, err := marshalMapString(envelope.Properties)
 	if err != nil {
 		return nil, fmt.Errorf("marshal properties: %w", err)
@@ -252,6 +251,8 @@ func buildEventInsertStatement(tableName string) string {
 	builder.WriteString("INSERT INTO ")
 	builder.WriteString(tableName)
 	builder.WriteString(" (")
+	// Only adapter-generated table names and a fixed column allowlist reach this
+	// SQL string; callers cannot inject arbitrary identifiers.
 	for idx, column := range eventInsertColumns {
 		if idx > 0 {
 			builder.WriteByte(',')

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/simpletrack/analytics-core/internal/storage"
 	"github.com/simpletrack/analytics-core/pkg/contracts"
 )
 
@@ -44,7 +45,7 @@ type fakeEventWriteGuard struct {
 	envelopes []contracts.EventEnvelope // envelopes records claimed events
 }
 
-func (f *fakeEventWriteGuard) StartEventWrite(_ context.Context, envelope contracts.EventEnvelope) (EventWriteClaim, error) {
+func (f *fakeEventWriteGuard) StartEventWrite(_ context.Context, envelope contracts.EventEnvelope) (storage.EventWriteClaim, error) {
 	f.envelopes = append(f.envelopes, envelope)
 	if f.err != nil {
 		return nil, f.err
