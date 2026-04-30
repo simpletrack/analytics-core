@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/simpletrack/analytics-core/internal/eventbus"
+	"github.com/simpletrack/analytics-core/internal/storage"
 	"github.com/simpletrack/analytics-core/pkg/contracts"
 )
 
@@ -73,16 +74,16 @@ func newMemoryStore() *memoryStore {
 	return &memoryStore{seen: map[string]struct{}{}}
 }
 
-func (s *memoryStore) WriteEvent(_ context.Context, envelope contracts.EventEnvelope) (StoreResult, error) {
+func (s *memoryStore) WriteEvent(_ context.Context, envelope contracts.EventEnvelope) (storage.WriteResult, error) {
 	if s.err != nil {
-		return StoreResult{}, s.err
+		return storage.WriteResult{}, s.err
 	}
 	if _, ok := s.seen[envelope.ID]; ok {
-		return StoreResult{Inserted: false}, nil
+		return storage.WriteResult{Inserted: false}, nil
 	}
 	s.seen[envelope.ID] = struct{}{}
 	s.inserted++
-	return StoreResult{Inserted: true}, nil
+	return storage.WriteResult{Inserted: true}, nil
 }
 
 type noopBus struct{}

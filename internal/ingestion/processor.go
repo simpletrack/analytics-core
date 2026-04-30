@@ -5,28 +5,18 @@ import (
 	"errors"
 
 	"github.com/simpletrack/analytics-core/internal/eventbus"
-	"github.com/simpletrack/analytics-core/pkg/contracts"
+	"github.com/simpletrack/analytics-core/internal/storage"
 )
-
-// StoreResult reports whether an event write inserted a new row.
-type StoreResult struct {
-	Inserted bool // false means the event already existed and ingestion stayed idempotent
-}
-
-// EventStore writes validated events to the analytics storage backend.
-type EventStore interface {
-	WriteEvent(context.Context, contracts.EventEnvelope) (StoreResult, error)
-}
 
 // Processor consumes events from an EventBus and writes them idempotently.
 type Processor struct {
 	bus   eventbus.EventBus
 	group eventbus.ConsumerGroup
-	store EventStore
+	store storage.EventWriter
 }
 
 // NewProcessor creates an ingestion processor.
-func NewProcessor(bus eventbus.EventBus, group eventbus.ConsumerGroup, store EventStore) (*Processor, error) {
+func NewProcessor(bus eventbus.EventBus, group eventbus.ConsumerGroup, store storage.EventWriter) (*Processor, error) {
 	if bus == nil {
 		return nil, errors.New("event bus is required")
 	}

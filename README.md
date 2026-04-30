@@ -10,10 +10,13 @@ upstream applications.
 ## P1 Scope
 
 - Standard event envelope.
+- Collect request validation and event normalization.
 - EventBus abstraction.
 - Direct in-process bus for tests and local demos.
 - Redis Stream bus for the first deployable queue path.
 - Kafka adapter boundary reserved for high-throughput deployments.
+- Storage `EventWriter` boundary.
+- ClickHouse table routing by tenant, project, and source.
 
 ## Queue Semantics
 

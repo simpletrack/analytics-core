@@ -24,12 +24,12 @@ const (
 
 // Options configures a Redis Stream EventBus.
 type Options struct {
-	Stream           string        // Redis stream name for accepted events
-	Block            time.Duration // blocking read timeout for new messages
-	Count            int64         // maximum messages read per poll
-	EnsureConsumer   bool          // creates the consumer group and stream when missing
-	MaxAttempts      int           // attempts before dead-lettering; zero means unlimited
-	DeadLetterStream string        // optional stream for exhausted messages
+	Stream           string        // Stream is the Redis stream name for accepted events
+	Block            time.Duration // Block is the blocking read timeout for new messages
+	Count            int64         // Count is the maximum messages read per poll
+	EnsureConsumer   bool          // EnsureConsumer creates the consumer group and stream when missing
+	MaxAttempts      int           // MaxAttempts is the attempts before dead-lettering; zero means unlimited
+	DeadLetterStream string        // DeadLetterStream is the optional stream for exhausted messages
 }
 
 // Bus implements EventBus on Redis Streams.
