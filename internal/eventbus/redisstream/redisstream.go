@@ -34,8 +34,8 @@ type Options struct {
 
 // Bus implements EventBus on Redis Streams.
 type Bus struct {
-	client *redis.Client
-	opts   Options
+	client *redis.Client // client owns Redis Stream network operations
+	opts   Options       // opts stores stream, group, retry, and dead-letter settings
 }
 
 // New creates a Redis Stream EventBus.

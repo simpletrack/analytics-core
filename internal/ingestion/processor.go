@@ -10,9 +10,9 @@ import (
 
 // Processor consumes events from an EventBus and writes them idempotently.
 type Processor struct {
-	bus   eventbus.EventBus
-	group eventbus.ConsumerGroup
-	store storage.EventWriter
+	bus   eventbus.EventBus      // bus supplies queue messages and owns ack/nack semantics
+	group eventbus.ConsumerGroup // group identifies this ingestion worker in the queue backend
+	store storage.EventWriter    // store persists events and reports duplicate no-op writes
 }
 
 // NewProcessor creates an ingestion processor.

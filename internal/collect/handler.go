@@ -18,8 +18,8 @@ type Clock func() time.Time
 // entrypoints should pass Request values here instead of passing framework
 // context objects through the analytics core.
 type Handler struct {
-	bus eventbus.EventBus
-	now Clock
+	bus eventbus.EventBus // bus receives normalized envelopes after validation
+	now Clock             // now supplies deterministic server receive time for tests and adapters
 }
 
 // NewHandler creates a collect handler with its required EventBus dependency.

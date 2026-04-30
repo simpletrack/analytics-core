@@ -10,8 +10,8 @@ import (
 
 // Bus is an in-process EventBus used for local tests and single-process demos.
 type Bus struct {
-	mu       sync.RWMutex
-	handlers []eventbus.Handler
+	mu       sync.RWMutex       // mu protects handler registration and publish snapshots
+	handlers []eventbus.Handler // handlers are synchronous in-process subscribers
 }
 
 // New creates an in-process event bus.

@@ -140,8 +140,8 @@ func serveCollect(handler fasthttp.RequestHandler, method string, path string, b
 }
 
 type recordingBus struct {
-	err       error
-	published []contracts.EventEnvelope
+	err       error                     // err forces Publish to fail through the HTTP adapter
+	published []contracts.EventEnvelope // published records envelopes accepted by collect.Handler
 }
 
 func (b *recordingBus) Publish(_ context.Context, envelope contracts.EventEnvelope) error {

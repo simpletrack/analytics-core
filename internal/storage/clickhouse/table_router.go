@@ -23,7 +23,7 @@ type Table struct {
 
 // TableRouter maps an event envelope to a physical ClickHouse table.
 type TableRouter struct {
-	prefix string
+	prefix string // prefix is the safe physical table prefix for routed event tables
 }
 
 // NewTableRouter creates a table router with a safe physical table prefix.

@@ -67,8 +67,8 @@ func TestHandlerReturnsPublishError(t *testing.T) {
 }
 
 type recordingBus struct {
-	err       error
-	published []contracts.EventEnvelope
+	err       error                     // err forces Publish to fail for handler error tests
+	published []contracts.EventEnvelope // published records envelopes accepted by collect.Handler
 }
 
 func newRecordingBus() *recordingBus {

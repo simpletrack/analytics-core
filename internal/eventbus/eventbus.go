@@ -26,6 +26,8 @@ type Handler func(context.Context, Message) error
 
 // EventBus hides the concrete queue implementation from collect and ingestion.
 type EventBus interface {
+	// Publish appends one validated event envelope to the queue.
 	Publish(context.Context, contracts.EventEnvelope) error
+	// Subscribe consumes messages for group and delegates each message to handler.
 	Subscribe(context.Context, ConsumerGroup, Handler) error
 }

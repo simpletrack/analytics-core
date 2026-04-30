@@ -65,9 +65,9 @@ func TestProcessorReturnsStoreErrorsForRetry(t *testing.T) {
 }
 
 type memoryStore struct {
-	err      error
-	inserted int
-	seen     map[string]struct{}
+	err      error               // err forces WriteEvent to fail for retry tests
+	inserted int                 // inserted records unique events written by the processor
+	seen     map[string]struct{} // seen stores event ids for duplicate no-op simulation
 }
 
 func newMemoryStore() *memoryStore {

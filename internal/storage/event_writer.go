@@ -12,6 +12,12 @@ type WriteResult struct {
 }
 
 // EventWriter writes validated events to the analytics storage backend.
+//
+// Implementations must keep database-specific batching, routing, retry, and
+// idempotency mechanics behind this interface so ingestion can acknowledge the
+// queue only after durable storage has either inserted or intentionally skipped
+// a duplicate event.
 type EventWriter interface {
+	// WriteEvent persists one validated event and reports duplicate no-op writes.
 	WriteEvent(context.Context, contracts.EventEnvelope) (WriteResult, error)
 }
