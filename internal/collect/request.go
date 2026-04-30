@@ -25,18 +25,18 @@ var (
 
 // Request is the normalized collect input before validation.
 type Request struct {
-	ID         string         // ID is the stable event id used for idempotent ingestion
-	TenantID   string         // TenantID is the tenant boundary key
-	ProjectID  string         // ProjectID is the project or website boundary key
-	SourceID   string         // SourceID is the source boundary key inside the project
-	SourceType string         // SourceType is the source category such as web, server, or mobile
-	EventName  string         // EventName is the analytics event name
-	DistinctID string         // DistinctID is the visitor or user identity key
-	SessionID  string         // SessionID is the optional session key
-	EventTime  time.Time      // EventTime is the timestamp produced by the source
-	Properties map[string]any // Properties are event-scoped properties
-	UserProps  map[string]any // UserProps are user-scoped properties
-	Source     string         // Source is an optional diagnostic source label
+	ID         string         `json:"id"`                        // ID is the stable event id used for idempotent ingestion
+	TenantID   string         `json:"tenant_id"`                 // TenantID is the tenant boundary key
+	ProjectID  string         `json:"project_id"`                // ProjectID is the project or website boundary key
+	SourceID   string         `json:"source_id"`                 // SourceID is the source boundary key inside the project
+	SourceType string         `json:"source_type"`               // SourceType is the source category such as web, server, or mobile
+	EventName  string         `json:"event_name"`                // EventName is the analytics event name
+	DistinctID string         `json:"distinct_id"`               // DistinctID is the visitor or user identity key
+	SessionID  string         `json:"session_id,omitempty"`      // SessionID is the optional session key
+	EventTime  time.Time      `json:"event_time,omitempty"`      // EventTime is the timestamp produced by the source
+	Properties map[string]any `json:"properties,omitempty"`      // Properties are event-scoped properties
+	UserProps  map[string]any `json:"user_properties,omitempty"` // UserProps are user-scoped properties
+	Source     string         `json:"source,omitempty"`          // Source is an optional diagnostic source label
 }
 
 // ValidationError describes a rejected collect field.
