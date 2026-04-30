@@ -36,10 +36,35 @@ type EventQueryPlan struct {
 	Limit         int    // Limit is the effective row cap after defaults and maximums
 }
 
+// EventRecord is one event row returned by an analytics query.
+type EventRecord struct {
+	ID             string    // ID is the stable event id used for idempotent ingestion
+	TenantID       string    // TenantID is the tenant boundary key
+	ProjectID      string    // ProjectID is the project or website boundary key
+	SourceID       string    // SourceID is the source boundary key inside the project
+	SourceType     string    // SourceType is the source category such as web, server, or mobile
+	EventName      string    // EventName is the analytics event name
+	DistinctID     string    // DistinctID is the visitor or user identity key
+	SessionID      string    // SessionID is the optional session key
+	EventTime      time.Time // EventTime is the timestamp produced by the source
+	ReceivedAt     time.Time // ReceivedAt is the timestamp accepted by collect
+	Properties     string    // Properties is the serialized event-scoped JSON payload
+	UserProperties string    // UserProperties is the serialized user-scoped JSON payload
+	Source         string    // Source is the optional source label for diagnostics
+}
+
 // EventQueryBuilder builds storage-specific event query plans.
 type EventQueryBuilder interface {
 	// BuildEventsQuery builds the paged Events table query.
 	BuildEventsQuery(context.Context, EventListQuery) (EventQueryPlan, error)
 	// BuildRealtimeQuery builds the recent-events Realtime query.
 	BuildRealtimeQuery(context.Context, RealtimeQuery) (EventQueryPlan, error)
+}
+
+// EventReader executes event queries against the storage backend.
+type EventReader interface {
+	// ListEvents returns paged Events rows for one tenant/project/source.
+	ListEvents(context.Context, EventListQuery) ([]EventRecord, error)
+	// ListRealtime returns recent Realtime rows for one tenant/project/source.
+	ListRealtime(context.Context, RealtimeQuery) ([]EventRecord, error)
 }
