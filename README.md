@@ -22,6 +22,7 @@ upstream applications.
 - ClickHouse native batch writer based on `clickhouse-go/v2 PrepareBatch`.
 - GORM/MySQL ingestion status guard for idempotent event writes.
 - Events and Realtime query plans built through a unified GORM ClickHouse query builder.
+- Opt-in end-to-end test for collect -> Redis Stream -> ingestion -> ClickHouse -> Realtime/Events reader.
 
 ## Queue Semantics
 
@@ -97,6 +98,15 @@ Run Redis Stream integration tests against the local Redis container:
 $env:ANALYTICS_CORE_REDIS_ADDR='127.0.0.1:26379'
 go test ./internal/eventbus/redisstream
 ```
+
+Run the full P1 data-pipeline end-to-end test against Redis, MySQL, and ClickHouse:
+
+```powershell
+$env:ANALYTICS_CORE_E2E='1'
+go test ./internal/e2e -run TestCollectToRealtimeAndEventsPipeline -v
+```
+
+The end-to-end test creates a routed ClickHouse event table, publishes pageview and custom-event collect requests through Redis Stream, consumes them through `ingestion.Processor`, writes them with the ClickHouse batch writer and MySQL idempotency guard, then reads them back through both Events and Realtime readers.
 
 Stop local dependencies:
 
