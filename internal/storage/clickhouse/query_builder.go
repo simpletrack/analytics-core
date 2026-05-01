@@ -33,6 +33,17 @@ var eventSelectColumns = []string{
 	"source",
 }
 
+var eventSortColumns = map[storage.EventSortField]string{
+	storage.EventSortByEventTime:  "event_time",
+	storage.EventSortByReceivedAt: "received_at",
+	storage.EventSortByEventName:  "event_name",
+}
+
+var eventSortDirections = map[storage.EventSortDirection]string{
+	storage.EventSortAscending:  "ASC",
+	storage.EventSortDescending: "DESC",
+}
+
 // EventQueryBuilderOption customizes the ClickHouse query builder.
 type EventQueryBuilderOption func(*EventQueryBuilder)
 
@@ -135,7 +146,11 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 	if query.DistinctID != "" {
 		scope = scope.Where("distinct_id = ?", query.DistinctID)
 	}
-	scope = scope.Order("event_time DESC").Order("received_at DESC").Limit(limit)
+	scope, err = b.applyEventsOrder(scope, query.SortField, query.SortDirection)
+	if err != nil {
+		return storage.EventQueryPlan{}, err
+	}
+	scope = scope.Limit(limit)
 	if query.Offset > 0 {
 		scope = scope.Offset(query.Offset)
 	}
@@ -180,6 +195,52 @@ func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
 		return b.maxLimit
 	}
 	return limit
+}
+
+func (b *EventQueryBuilder) applyEventsOrder(scope *gorm.DB, field storage.EventSortField, direction storage.EventSortDirection) (*gorm.DB, error) {
+	// Keep sort fields and directions closed over typed constants so UI query
+	// strings cannot become arbitrary SQL identifiers or clauses.
+	column, err := normalizeSortField(field)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := normalizeSortDirection(direction)
+	if err != nil {
+		return nil, err
+	}
+
+	scope = scope.Order(column + " " + dir)
+	// Add deterministic tie-breakers from the same allowlisted columns. This
+	// keeps Events pagination stable without exposing another sort surface.
+	if column != "event_time" {
+		scope = scope.Order("event_time DESC")
+	}
+	if column != "received_at" {
+		scope = scope.Order("received_at DESC")
+	}
+	return scope, nil
+}
+
+func normalizeSortField(field storage.EventSortField) (string, error) {
+	if field == "" {
+		field = storage.EventSortByEventTime
+	}
+	column, ok := eventSortColumns[field]
+	if !ok {
+		return "", fmt.Errorf("unsupported events sort field %q", field)
+	}
+	return column, nil
+}
+
+func normalizeSortDirection(direction storage.EventSortDirection) (string, error) {
+	if direction == "" {
+		direction = storage.EventSortDescending
+	}
+	dir, ok := eventSortDirections[direction]
+	if !ok {
+		return "", fmt.Errorf("unsupported events sort direction %q", direction)
+	}
+	return dir, nil
 }
 
 func (b *EventQueryBuilder) baseScope(ctx context.Context, tableName string) *gorm.DB {

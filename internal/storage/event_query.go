@@ -5,17 +5,41 @@ import (
 	"time"
 )
 
+// EventSortField is the allowlisted Events sort field.
+type EventSortField string
+
+const (
+	// EventSortByEventTime sorts by the event timestamp produced by the source.
+	EventSortByEventTime EventSortField = "event_time"
+	// EventSortByReceivedAt sorts by the server-side collect acceptance timestamp.
+	EventSortByReceivedAt EventSortField = "received_at"
+	// EventSortByEventName sorts by the analytics event name.
+	EventSortByEventName EventSortField = "event_name"
+)
+
+// EventSortDirection is the allowlisted Events sort direction.
+type EventSortDirection string
+
+const (
+	// EventSortAscending sorts rows from lowest to highest value.
+	EventSortAscending EventSortDirection = "asc"
+	// EventSortDescending sorts rows from highest to lowest value.
+	EventSortDescending EventSortDirection = "desc"
+)
+
 // EventListQuery describes one paged Events table query.
 type EventListQuery struct {
-	TenantID   string    // TenantID is the tenant boundary key
-	ProjectID  string    // ProjectID is the project or website boundary key
-	SourceID   string    // SourceID is the source boundary key inside the project
-	EventName  string    // EventName optionally filters to one analytics event name
-	DistinctID string    // DistinctID optionally filters to one visitor or user key
-	From       time.Time // From optionally filters events at or after this event time
-	To         time.Time // To optionally filters events before this event time
-	Limit      int       // Limit caps returned rows before the builder-level maximum
-	Offset     int       // Offset skips rows for Events pagination
+	TenantID      string             // TenantID is the tenant boundary key
+	ProjectID     string             // ProjectID is the project or website boundary key
+	SourceID      string             // SourceID is the source boundary key inside the project
+	EventName     string             // EventName optionally filters to one analytics event name
+	DistinctID    string             // DistinctID optionally filters to one visitor or user key
+	From          time.Time          // From optionally filters events at or after this event time
+	To            time.Time          // To optionally filters events before this event time
+	Limit         int                // Limit caps returned rows before the builder-level maximum
+	Offset        int                // Offset skips rows for Events pagination
+	SortField     EventSortField     // SortField chooses one allowlisted Events sort field
+	SortDirection EventSortDirection // SortDirection chooses asc or desc for SortField
 }
 
 // RealtimeQuery describes the recent-events query used by Realtime.

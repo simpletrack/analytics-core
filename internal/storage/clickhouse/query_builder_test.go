@@ -101,6 +101,32 @@ func TestEventQueryBuilderBuildsRealtimeQuery(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderUsesSortAllowlist(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:      "tenant_1",
+		ProjectID:     "project_1",
+		SourceID:      "source_1",
+		SortField:     storage.EventSortByReceivedAt,
+		SortDirection: storage.EventSortAscending,
+	})
+	if err != nil {
+		t.Fatalf("build events query failed: %v", err)
+	}
+
+	if !strings.Contains(plan.SQL, "ORDER BY received_at ASC,event_time DESC") {
+		t.Fatalf("expected allowlisted received_at sort in %q", plan.SQL)
+	}
+}
+
 func TestEventQueryBuilderRejectsInvalidQueries(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {
@@ -134,5 +160,21 @@ func TestEventQueryBuilderRejectsInvalidQueries(t *testing.T) {
 		To:        now,
 	}); err == nil {
 		t.Fatal("expected invalid time range error")
+	}
+	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		SortField: storage.EventSortField("bad_field"),
+	}); err == nil {
+		t.Fatal("expected unsupported sort field error")
+	}
+	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:      "tenant_1",
+		ProjectID:     "project_1",
+		SourceID:      "source_1",
+		SortDirection: storage.EventSortDirection("sideways"),
+	}); err == nil {
+		t.Fatal("expected unsupported sort direction error")
 	}
 }
