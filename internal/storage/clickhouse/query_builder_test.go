@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,50 @@ func TestEventQueryBuilderUsesSortAllowlist(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderUsesFilterAllowlist(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		Filters: []storage.EventFilter{
+			{
+				Field:    storage.EventFilterBySessionID,
+				Operator: storage.EventFilterEquals,
+				Value:    "session_1",
+			},
+			{
+				Field:    storage.EventFilterBySourceType,
+				Operator: storage.EventFilterNotEquals,
+				Value:    "server",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build events query failed: %v", err)
+	}
+
+	for _, fragment := range []string{
+		"session_id = ?",
+		"source_type != ?",
+	} {
+		if !strings.Contains(plan.SQL, fragment) {
+			t.Fatalf("expected SQL fragment %q in %q", fragment, plan.SQL)
+		}
+	}
+	if len(plan.Args) != 6 {
+		t.Fatalf("expected tenant/project/source/filter/filter/limit args, got %d: %#v", len(plan.Args), plan.Args)
+	}
+}
+
 func TestEventQueryBuilderRejectsInvalidQueries(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {
@@ -137,44 +182,132 @@ func TestEventQueryBuilderRejectsInvalidQueries(t *testing.T) {
 		t.Fatalf("new event query builder failed: %v", err)
 	}
 
-	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
-		TenantID:  "tenant_1",
-		ProjectID: "project_1",
-	}); err == nil {
-		t.Fatal("expected missing source_id error")
-	}
-	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
-		TenantID:  "tenant_1",
-		ProjectID: "project_1",
-		SourceID:  "source_1",
-		Offset:    -1,
-	}); err == nil {
-		t.Fatal("expected negative offset error")
-	}
 	now := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
-	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
-		TenantID:  "tenant_1",
-		ProjectID: "project_1",
-		SourceID:  "source_1",
-		From:      now,
-		To:        now,
-	}); err == nil {
-		t.Fatal("expected invalid time range error")
+	cases := []struct {
+		name  string
+		query storage.EventListQuery
+		want  string
+	}{
+		{
+			name: "missing source id",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+			},
+			want: "source_id is required",
+		},
+		{
+			name: "negative offset",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				Offset:    -1,
+			},
+			want: "offset must be non-negative",
+		},
+		{
+			name: "invalid time range",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				From:      now,
+				To:        now,
+			},
+			want: "from must be before to",
+		},
+		{
+			name: "unsupported sort field",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				SortField: storage.EventSortField("bad_field"),
+			},
+			want: "unsupported events sort field",
+		},
+		{
+			name: "unsupported sort direction",
+			query: storage.EventListQuery{
+				TenantID:      "tenant_1",
+				ProjectID:     "project_1",
+				SourceID:      "source_1",
+				SortDirection: storage.EventSortDirection("sideways"),
+			},
+			want: "unsupported events sort direction",
+		},
+		{
+			name: "unsupported filter field",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				Filters: []storage.EventFilter{
+					{
+						Field:    storage.EventFilterField("raw_sql"),
+						Operator: storage.EventFilterEquals,
+						Value:    "page_view",
+					},
+				},
+			},
+			want: "unsupported events filter field",
+		},
+		{
+			name: "unsupported filter operator",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				Filters: []storage.EventFilter{
+					{
+						Field:    storage.EventFilterByEventName,
+						Operator: storage.EventFilterOperator("contains"),
+						Value:    "page",
+					},
+				},
+			},
+			want: "unsupported events filter operator",
+		},
+		{
+			name: "empty filter value",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				Filters: []storage.EventFilter{
+					{
+						Field:    storage.EventFilterByEventName,
+						Operator: storage.EventFilterEquals,
+					},
+				},
+			},
+			want: "event filter 0 value is required",
+		},
+		{
+			name: "too many filters",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				Filters:   make([]storage.EventFilter, defaultMaxFilters+1),
+			},
+			want: "too many event filters",
+		},
 	}
-	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
-		TenantID:  "tenant_1",
-		ProjectID: "project_1",
-		SourceID:  "source_1",
-		SortField: storage.EventSortField("bad_field"),
-	}); err == nil {
-		t.Fatal("expected unsupported sort field error")
-	}
-	if _, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
-		TenantID:      "tenant_1",
-		ProjectID:     "project_1",
-		SourceID:      "source_1",
-		SortDirection: storage.EventSortDirection("sideways"),
-	}); err == nil {
-		t.Fatal("expected unsupported sort direction error")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := builder.BuildEventsQuery(context.Background(), tc.query)
+			if err == nil {
+				t.Fatal("expected invalid event query error")
+			}
+			if !errors.Is(err, storage.ErrInvalidEventQuery) {
+				t.Fatalf("expected ErrInvalidEventQuery, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
 	}
 }

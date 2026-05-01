@@ -15,6 +15,7 @@ const (
 	defaultEventsLimit   = 100
 	defaultRealtimeLimit = 50
 	defaultMaxQueryLimit = 1000
+	defaultMaxFilters    = 20
 )
 
 var eventSelectColumns = []string{
@@ -42,6 +43,18 @@ var eventSortColumns = map[storage.EventSortField]string{
 var eventSortDirections = map[storage.EventSortDirection]string{
 	storage.EventSortAscending:  "ASC",
 	storage.EventSortDescending: "DESC",
+}
+
+var eventFilterColumns = map[storage.EventFilterField]string{
+	storage.EventFilterByEventName:  "event_name",
+	storage.EventFilterByDistinctID: "distinct_id",
+	storage.EventFilterBySessionID:  "session_id",
+	storage.EventFilterBySourceType: "source_type",
+}
+
+var eventFilterOperators = map[storage.EventFilterOperator]string{
+	storage.EventFilterEquals:    "=",
+	storage.EventFilterNotEquals: "!=",
 }
 
 // EventQueryBuilderOption customizes the ClickHouse query builder.
@@ -113,17 +126,20 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 	// Reject invalid caller windows before table routing so malformed UI/API
 	// input cannot produce a broad or ambiguous ClickHouse scan.
 	if query.Offset < 0 {
-		return storage.EventQueryPlan{}, errors.New("offset must be non-negative")
+		return storage.EventQueryPlan{}, invalidEventQueryError("offset must be non-negative")
 	}
 	if !query.From.IsZero() && !query.To.IsZero() && !query.From.Before(query.To) {
-		return storage.EventQueryPlan{}, errors.New("from must be before to")
+		return storage.EventQueryPlan{}, invalidEventQueryError("from must be before to")
+	}
+	if len(query.Filters) > defaultMaxFilters {
+		return storage.EventQueryPlan{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters), defaultMaxFilters)
 	}
 
 	// Resolve the physical table before touching GORM so dynamic table routing
 	// stays owned by the ClickHouse adapter.
 	table, err := b.routeQuery(query.TenantID, query.ProjectID, query.SourceID)
 	if err != nil {
-		return storage.EventQueryPlan{}, err
+		return storage.EventQueryPlan{}, invalidEventQueryError("%v", err)
 	}
 
 	// Normalize limits at the boundary; handlers should not decide ClickHouse
@@ -145,6 +161,10 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 	}
 	if query.DistinctID != "" {
 		scope = scope.Where("distinct_id = ?", query.DistinctID)
+	}
+	scope, err = b.applyEventFilters(scope, query.Filters)
+	if err != nil {
+		return storage.EventQueryPlan{}, err
 	}
 	scope, err = b.applyEventsOrder(scope, query.SortField, query.SortDirection)
 	if err != nil {
@@ -183,6 +203,27 @@ func (b *EventQueryBuilder) routeQuery(tenantID string, projectID string, source
 		ProjectID: projectID,
 		SourceID:  sourceID,
 	})
+}
+
+func (b *EventQueryBuilder) applyEventFilters(scope *gorm.DB, filters []storage.EventFilter) (*gorm.DB, error) {
+	// Each filter is decomposed into an allowlisted identifier, an allowlisted
+	// operator, and a bound value. Callers can combine predicates but cannot
+	// choose raw SQL columns or comparison fragments.
+	for idx, filter := range filters {
+		column, err := normalizeFilterField(filter.Field)
+		if err != nil {
+			return nil, err
+		}
+		operator, err := normalizeFilterOperator(filter.Operator)
+		if err != nil {
+			return nil, err
+		}
+		if filter.Value == "" {
+			return nil, invalidEventQueryError("event filter %d value is required", idx)
+		}
+		scope = scope.Where(column+" "+operator+" ?", filter.Value)
+	}
+	return scope, nil
 }
 
 func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
@@ -227,7 +268,7 @@ func normalizeSortField(field storage.EventSortField) (string, error) {
 	}
 	column, ok := eventSortColumns[field]
 	if !ok {
-		return "", fmt.Errorf("unsupported events sort field %q", field)
+		return "", invalidEventQueryError("unsupported events sort field %q", field)
 	}
 	return column, nil
 }
@@ -238,9 +279,30 @@ func normalizeSortDirection(direction storage.EventSortDirection) (string, error
 	}
 	dir, ok := eventSortDirections[direction]
 	if !ok {
-		return "", fmt.Errorf("unsupported events sort direction %q", direction)
+		return "", invalidEventQueryError("unsupported events sort direction %q", direction)
 	}
 	return dir, nil
+}
+
+func normalizeFilterField(field storage.EventFilterField) (string, error) {
+	column, ok := eventFilterColumns[field]
+	if !ok {
+		return "", invalidEventQueryError("unsupported events filter field %q", field)
+	}
+	return column, nil
+}
+
+func normalizeFilterOperator(operator storage.EventFilterOperator) (string, error) {
+	sqlOperator, ok := eventFilterOperators[operator]
+	if !ok {
+		return "", invalidEventQueryError("unsupported events filter operator %q", operator)
+	}
+	return sqlOperator, nil
+}
+
+func invalidEventQueryError(format string, args ...any) error {
+	args = append([]any{storage.ErrInvalidEventQuery}, args...)
+	return fmt.Errorf("%w: "+format, args...)
 }
 
 func (b *EventQueryBuilder) baseScope(ctx context.Context, tableName string) *gorm.DB {

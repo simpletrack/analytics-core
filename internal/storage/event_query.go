@@ -2,8 +2,12 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrInvalidEventQuery marks caller-supplied query parameters rejected before storage execution.
+var ErrInvalidEventQuery = errors.New("invalid event query")
 
 // EventSortField is the allowlisted Events sort field.
 type EventSortField string
@@ -27,6 +31,37 @@ const (
 	EventSortDescending EventSortDirection = "desc"
 )
 
+// EventFilterField is the allowlisted Events filter field.
+type EventFilterField string
+
+const (
+	// EventFilterByEventName filters by the analytics event name.
+	EventFilterByEventName EventFilterField = "event_name"
+	// EventFilterByDistinctID filters by the visitor or user identity key.
+	EventFilterByDistinctID EventFilterField = "distinct_id"
+	// EventFilterBySessionID filters by the optional session key.
+	EventFilterBySessionID EventFilterField = "session_id"
+	// EventFilterBySourceType filters by the source category such as web, server, or mobile.
+	EventFilterBySourceType EventFilterField = "source_type"
+)
+
+// EventFilterOperator is the allowlisted Events filter operator.
+type EventFilterOperator string
+
+const (
+	// EventFilterEquals matches rows whose field equals Value.
+	EventFilterEquals EventFilterOperator = "eq"
+	// EventFilterNotEquals matches rows whose field does not equal Value.
+	EventFilterNotEquals EventFilterOperator = "neq"
+)
+
+// EventFilter describes one allowlisted Events filter.
+type EventFilter struct {
+	Field    EventFilterField    // Field chooses one allowlisted event column
+	Operator EventFilterOperator // Operator chooses one allowlisted comparison
+	Value    string              // Value is always bound as a query argument
+}
+
 // EventListQuery describes one paged Events table query.
 type EventListQuery struct {
 	TenantID      string             // TenantID is the tenant boundary key
@@ -40,6 +75,7 @@ type EventListQuery struct {
 	Offset        int                // Offset skips rows for Events pagination
 	SortField     EventSortField     // SortField chooses one allowlisted Events sort field
 	SortDirection EventSortDirection // SortDirection chooses asc or desc for SortField
+	Filters       []EventFilter      // Filters are extra allowlisted field/operator/value predicates
 }
 
 // RealtimeQuery describes the recent-events query used by Realtime.

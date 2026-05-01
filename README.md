@@ -23,6 +23,7 @@ upstream applications.
 - GORM/MySQL ingestion status guard for idempotent event writes.
 - Events and Realtime query plans built through a unified GORM ClickHouse query builder.
 - Typed Events sort allowlist for query-builder controlled ordering.
+- Typed Events filter field and operator allowlists with invalid-query error classification.
 - Opt-in end-to-end test for collect -> Redis Stream -> ingestion -> ClickHouse -> Realtime/Events reader.
 
 ## Queue Semantics
@@ -49,6 +50,7 @@ upstream applications.
 - Events and Realtime queries use `storage.EventQueryBuilder`; P1 returns SQL plans before adding an execution adapter.
 - ClickHouse query execution uses `storage.EventReader`; it executes query plans through GORM Raw and returns storage-neutral `EventRecord` rows.
 - Events sorting is constrained to typed allowlisted fields and directions before SQL generation.
+- Events filtering is constrained to typed allowlisted fields and operators; invalid caller filters return `storage.ErrInvalidEventQuery` before SQL generation.
 - High-throughput event inserts use native ClickHouse batches. GORM is used for query construction and MySQL status storage, not as the default event insert hot path.
 
 ## Development
