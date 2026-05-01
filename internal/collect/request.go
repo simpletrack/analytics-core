@@ -1,8 +1,10 @@
 package collect
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -14,13 +16,17 @@ const (
 	maxClockSkew       = 5 * time.Minute
 	maxEventNameLength = 128
 	maxIDLength        = 128
+	maxPropertyCount   = 64
+	maxPropertyKeyLen  = 128
+	maxPropertyStrLen  = 2048
 	maxSourceTypeLen   = 32
 )
 
 var (
-	eventNamePattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
-	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
-	sourceTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+	eventNamePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	identifierPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	propertyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	sourceTypePattern  = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 )
 
 // Request is the normalized collect input before validation.
@@ -94,6 +100,12 @@ func Normalize(request Request, receivedAt time.Time) (contracts.EventEnvelope, 
 		if err := validateIdentifier("session_id", request.SessionID); err != nil {
 			return contracts.EventEnvelope{}, err
 		}
+	}
+	if err := validateProperties("properties", request.Properties); err != nil {
+		return contracts.EventEnvelope{}, err
+	}
+	if err := validateProperties("user_properties", request.UserProps); err != nil {
+		return contracts.EventEnvelope{}, err
 	}
 
 	eventTime := request.EventTime
@@ -171,6 +183,81 @@ func validateSourceType(value string) error {
 		return ValidationError{Field: "source_type", Reason: "contains unsupported characters"}
 	}
 	return nil
+}
+
+func validateProperties(field string, values map[string]any) error {
+	// Keep open-ended event data bounded before it reaches the queue. Storage
+	// adapters can still choose JSON, Map, or typed rows later, but P1 does not
+	// accept unbounded property bags.
+	if len(values) > maxPropertyCount {
+		return ValidationError{Field: field, Reason: "has too many entries"}
+	}
+
+	// Validate each key and scalar value independently so future property
+	// dictionaries can trust the collect contract instead of re-sanitizing raw
+	// SDK input.
+	for key, value := range values {
+		if err := validatePropertyKey(field, key); err != nil {
+			return err
+		}
+		if err := validatePropertyValue(propertyFieldName(field, key), value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePropertyKey(field string, key string) error {
+	if key == "" {
+		return ValidationError{Field: field, Reason: "contains empty property key"}
+	}
+	if len(key) > maxPropertyKeyLen {
+		return ValidationError{Field: propertyFieldName(field, key), Reason: "key is too long"}
+	}
+	if !propertyKeyPattern.MatchString(key) {
+		return ValidationError{Field: propertyFieldName(field, key), Reason: "key contains unsupported characters"}
+	}
+	return nil
+}
+
+func validatePropertyValue(field string, value any) error {
+	// P1 accepts scalar values that can be indexed or flattened later without a
+	// schema guess. Nested objects and arrays stay out until the property model
+	// defines whether they are raw JSON, typed rows, or ignored metadata.
+	switch typed := value.(type) {
+	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return nil
+	case string:
+		if len(typed) > maxPropertyStrLen {
+			return ValidationError{Field: field, Reason: "string value is too long"}
+		}
+		return nil
+	case float32:
+		return validateFloatProperty(field, float64(typed))
+	case float64:
+		return validateFloatProperty(field, typed)
+	case json.Number:
+		if _, err := typed.Float64(); err != nil {
+			return ValidationError{Field: field, Reason: "number value is invalid"}
+		}
+		return nil
+	default:
+		return ValidationError{Field: field, Reason: "has unsupported value type"}
+	}
+}
+
+func validateFloatProperty(field string, value float64) error {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return ValidationError{Field: field, Reason: "number value is invalid"}
+	}
+	return nil
+}
+
+func propertyFieldName(field string, key string) string {
+	if key == "" {
+		return field
+	}
+	return field + "." + key
 }
 
 func cloneMap(values map[string]any) map[string]any {

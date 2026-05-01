@@ -11,6 +11,7 @@ upstream applications.
 
 - Standard event envelope.
 - Collect request validation and event normalization.
+- Collect-time property intake guardrails for key shape, count, scalar value types, and string length.
 - Collect handler that publishes normalized envelopes to an EventBus.
 - fasthttp collect route that accepts JSON events and keeps framework details outside the core handler.
 - EventBus abstraction.
@@ -41,6 +42,7 @@ upstream applications.
 - `internal/collect/httpapi` only decodes JSON, maps HTTP status codes, and calls `collect.Handler`.
 - P1 exposes `POST /collect` as the stable event reporting route; health and query routes are added separately from the reporting hot path.
 - `collect.Handler` remains framework-independent so future gRPC, SDK, or worker entrypoints can reuse the same validation and publish path.
+- Event and user properties are accepted as bounded scalar bags in P1; nested objects and arrays wait for the explicit property storage model.
 
 ## Storage Boundaries
 

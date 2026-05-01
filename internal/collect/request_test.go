@@ -2,6 +2,8 @@ package collect
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,6 +82,81 @@ func TestNormalizeRejectsFutureEventTime(t *testing.T) {
 	_, err := Normalize(request, receivedAt)
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestNormalizeRejectsInvalidPropertyKey(t *testing.T) {
+	request := validRequest()
+	request.Properties = map[string]any{"bad key": "value"}
+
+	_, err := Normalize(request, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	var validationErr ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected ValidationError, got %T", err)
+	}
+	if validationErr.Field != "properties.bad key" {
+		t.Fatalf("expected properties.bad key error, got %q", validationErr.Field)
+	}
+}
+
+func TestNormalizeRejectsUnsupportedPropertyValue(t *testing.T) {
+	request := validRequest()
+	request.Properties = map[string]any{"nested": map[string]any{"path": "/"}}
+
+	_, err := Normalize(request, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	var validationErr ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected ValidationError, got %T", err)
+	}
+	if validationErr.Field != "properties.nested" {
+		t.Fatalf("expected properties.nested error, got %q", validationErr.Field)
+	}
+}
+
+func TestNormalizeRejectsTooManyUserProperties(t *testing.T) {
+	request := validRequest()
+	request.UserProps = make(map[string]any, maxPropertyCount+1)
+	for idx := 0; idx <= maxPropertyCount; idx++ {
+		request.UserProps[fmt.Sprintf("prop_%d", idx)] = "value"
+	}
+
+	_, err := Normalize(request, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	var validationErr ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected ValidationError, got %T", err)
+	}
+	if validationErr.Field != "user_properties" {
+		t.Fatalf("expected user_properties error, got %q", validationErr.Field)
+	}
+}
+
+func TestNormalizeRejectsLongPropertyString(t *testing.T) {
+	request := validRequest()
+	request.Properties = map[string]any{"label": strings.Repeat("x", maxPropertyStrLen+1)}
+
+	_, err := Normalize(request, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	var validationErr ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected ValidationError, got %T", err)
+	}
+	if validationErr.Field != "properties.label" {
+		t.Fatalf("expected properties.label error, got %q", validationErr.Field)
 	}
 }
 
