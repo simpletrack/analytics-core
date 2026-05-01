@@ -57,7 +57,7 @@ type BatchWriter struct {
 type nativeBatch interface {
 	// Abort releases driver resources after append or send failure.
 	Abort() error
-	// Append adds one event row to the native ClickHouse batch.
+	// Append adds one row to the native ClickHouse batch.
 	Append(v ...any) error
 	// Send flushes the accumulated rows to ClickHouse.
 	Send() error

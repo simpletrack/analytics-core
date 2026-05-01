@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,21 @@ type EventPropertyRecord struct {
 	StringValue string            // StringValue stores string property values
 	NumberValue float64           // NumberValue stores numeric property values
 	BoolValue   bool              // BoolValue stores boolean property values
+}
+
+// PropertyWriteResult reports how many property rows were appended.
+type PropertyWriteResult struct {
+	Rows int // Rows is the number of property records accepted by the storage adapter
+}
+
+// EventPropertyWriter writes typed event property rows to the analytics storage backend.
+//
+// Implementations own the physical property table, batching protocol, and
+// adapter-specific retry behavior. Event ingestion should pass records produced
+// by FlattenEventProperties instead of reparsing EventEnvelope maps.
+type EventPropertyWriter interface {
+	// WriteEventProperties persists typed event property rows.
+	WriteEventProperties(context.Context, []EventPropertyRecord) (PropertyWriteResult, error)
 }
 
 // FlattenEventProperties converts event and user property maps into typed rows.
