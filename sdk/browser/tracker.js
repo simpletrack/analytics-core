@@ -12,6 +12,24 @@
   var maxPropertyStringLength = 2048;
   var propertyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/;
   var sourceTypePattern = /^[a-z][a-z0-9_-]*$/;
+  var attributionParameters = {
+    utm_source: 'utm.source',
+    utm_medium: 'utm.medium',
+    utm_campaign: 'utm.campaign',
+    utm_term: 'utm.term',
+    utm_content: 'utm.content',
+    utm_id: 'utm.id',
+  };
+  var clickIDParameters = {
+    gclid: 'click.gclid',
+    dclid: 'click.dclid',
+    gbraid: 'click.gbraid',
+    wbraid: 'click.wbraid',
+    fbclid: 'click.fbclid',
+    msclkid: 'click.msclkid',
+    ttclid: 'click.ttclid',
+    li_fat_id: 'click.li_fat_id',
+  };
 
   function attr(name) {
     if (!script || typeof script.getAttribute !== 'function') return '';
@@ -118,21 +136,50 @@
     }
   }
 
+  function cleanPageURL() {
+    try {
+      var url = new window.URL(window.location.href);
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch (_err) {
+      return String(window.location.origin || '') + String(window.location.pathname || '');
+    }
+  }
+
   function baseProperties() {
     var screenValue =
       window.screen && window.screen.width && window.screen.height
         ? window.screen.width + 'x' + window.screen.height
         : '';
 
-    return sanitizeProperties({
+    var values = {
       'page.title': document.title || '',
-      'page.url': currentURL(),
+      'page.url': cleanPageURL(),
       'page.path': window.location.pathname || '',
       'page.hostname': window.location.hostname || '',
       'page.referrer': document.referrer || '',
       screen: screenValue,
       language: (window.navigator && window.navigator.language) || '',
-    });
+    };
+
+    addQueryProperties(values, attributionParameters);
+    addQueryProperties(values, clickIDParameters);
+    return sanitizeProperties(values);
+  }
+
+  function addQueryProperties(values, mapping) {
+    try {
+      var url = new window.URL(window.location.href);
+      Object.keys(mapping).forEach(function (queryName) {
+        var value = url.searchParams.get(queryName);
+        if (value) {
+          values[mapping[queryName]] = value;
+        }
+      });
+    } catch (_err) {
+      return;
+    }
   }
 
   function sanitizeProperties(values) {

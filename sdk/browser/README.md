@@ -33,6 +33,12 @@ route changes produce additional pageviews.
 `tenant_id`, `project_id`, `source_id`, `source_type`, `event_name`,
 `distinct_id`, `event_time`, `properties`, and `source`.
 
+Pageview and event properties automatically include page metadata plus
+allowlisted marketing attribution query parameters such as `utm.source`,
+`utm.medium`, `utm.campaign`, `click.gclid`, `click.fbclid`, and
+`click.msclkid`. `page.url` is stored without query or hash fragments, and the
+SDK does not copy arbitrary query-string fields as separate properties.
+
 ## Identify
 
 ```html

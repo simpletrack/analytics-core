@@ -21,7 +21,12 @@ test('auto pageview sends the collect request shape', async () => {
   assert.match(requests[0].body.distinct_id, /^dst_/);
   assert.equal(requests[0].body.properties['page.path'], '/docs');
   assert.equal(requests[0].body.properties['page.hostname'], 'app.example');
+  assert.equal(requests[0].body.properties['page.url'], 'https://app.example/docs');
   assert.equal(requests[0].body.properties.language, 'en-US');
+  assert.equal(requests[0].body.properties['utm.source'], 'newsletter');
+  assert.equal(requests[0].body.properties['utm.campaign'], 'launch');
+  assert.equal(requests[0].body.properties['click.gclid'], 'gclid_123');
+  assert.equal(requests[0].body.properties.debug, undefined);
 });
 
 test('manual track sends event properties without nested values', async () => {
@@ -232,7 +237,9 @@ function loadTracker(attrs = {}, overrides = {}, sharedStorage) {
         storage.set(key, value);
       },
     },
-    location: new URL('https://app.example/docs?utm=1#top'),
+    location: new URL(
+      'https://app.example/docs?utm_source=newsletter&utm_campaign=launch&gclid=gclid_123&debug=true#top',
+    ),
     navigator: {
       language: 'en-US',
     },
