@@ -47,6 +47,7 @@ type Request struct {
 	Properties map[string]any `json:"properties,omitempty"`      // Properties are event-scoped properties.
 	UserProps  map[string]any `json:"user_properties,omitempty"` // UserProps are user-scoped properties.
 	Source     string         `json:"source,omitempty"`          // Source is an optional diagnostic source label.
+	Client     ClientInfo     `json:"-"`                         // Client carries transient transport metadata for collect stages.
 }
 
 // ValidationError describes a rejected collect field.
@@ -143,6 +144,7 @@ func trimRequest(request Request) Request {
 	request.DistinctID = strings.TrimSpace(request.DistinctID)
 	request.SessionID = strings.TrimSpace(request.SessionID)
 	request.Source = strings.TrimSpace(request.Source)
+	request.Client = normalizeClientInfo(request.Client)
 	return request
 }
 
