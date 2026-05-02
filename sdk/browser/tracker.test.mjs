@@ -100,6 +100,41 @@ test('invalid manual track event names are not converted to pageviews', async ()
   assert.equal(requests.length, 0);
 });
 
+test('do not track suppresses sends only when explicitly enabled', async () => {
+  const dntStorage = new Map();
+  const optedOut = loadTracker(
+    { 'data-do-not-track': 'true' },
+    {
+      navigator: {
+        doNotTrack: '1',
+        language: 'en-US',
+      },
+    },
+    dntStorage,
+  );
+
+  await flushTimers();
+  await optedOut.window.simpletrack.track('signup_started');
+  await optedOut.window.simpletrack.identify('user_123', { role: 'admin' });
+
+  const defaultBehavior = loadTracker(
+    {},
+    {
+      navigator: {
+        doNotTrack: '1',
+        language: 'en-US',
+      },
+    },
+  );
+
+  await flushTimers();
+
+  assert.equal(optedOut.requests.length, 0);
+  assert.equal(dntStorage.size, 0);
+  assert.equal(defaultBehavior.requests.length, 1);
+  assert.equal(defaultBehavior.requests[0].body.event_name, 'pageview');
+});
+
 test('history changes trigger pageviews when the URL changes', async () => {
   const { window, requests } = loadTracker();
 

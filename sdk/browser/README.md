@@ -60,6 +60,7 @@ falls back to an in-memory id if storage is blocked.
 | `data-collect-url` | script origin + `/collect` | POST target for collect. |
 | `data-auto-track` | `true` | Set to `false` to disable automatic pageviews. |
 | `data-track-history` | `true` | Set to `false` to disable SPA route pageviews. |
+| `data-do-not-track` | `false` | Set to `true` to suppress sends when the browser advertises DNT. |
 | `data-debug` | `false` | Set to `true` to log send attempts and skipped fields. |
 | `data-fetch-credentials` | `omit` | Fetch credentials mode for same-origin deployments. |
 

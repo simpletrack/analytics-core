@@ -55,7 +55,7 @@ upstream applications.
 
 - `sdk/browser/tracker.js` is the P1 browser tracker for websites and docs snippets.
 - It reads `data-tenant-id`, `data-project-id`, `data-source-id`, and `data-collect-url` from the script tag and posts the stable collect request shape to `POST /collect`.
-- It sends an automatic `pageview`, patches SPA history changes for route pageviews, exposes `window.simpletrack.track(name, properties)`, and exposes `window.simpletrack.identify(id, userProperties)`.
+- It sends an automatic `pageview`, patches SPA history changes for route pageviews, exposes `window.simpletrack.track(name, properties)`, exposes `window.simpletrack.identify(id, userProperties)`, and can suppress sends when opt-in DNT handling is enabled.
 - The SDK does not add cookies. It stores the current `distinct_id` in `localStorage` when available and falls back to an in-memory id when storage is blocked.
 - Browser SDK tests run with Node's built-in test runner and a fake browser window, so the SDK remains dependency-free.
 

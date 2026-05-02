@@ -26,13 +26,14 @@
     collectURL: attr('collect-url') || defaultCollectURL(script),
     autoTrack: attr('auto-track') !== 'false',
     trackHistory: attr('track-history') !== 'false',
+    respectDoNotTrack: attr('do-not-track') === 'true',
     debug: attr('debug') === 'true',
     credentials: attr('fetch-credentials') || 'omit',
   };
   var identityStorageKey = scopedIdentityStorageKey(config);
 
   var state = {
-    distinctID: initialDistinctID(identityStorageKey),
+    distinctID: trackingSuppressed() ? randomToken('dst') : initialDistinctID(identityStorageKey),
     lastPageURL: '',
   };
 
@@ -203,6 +204,18 @@
     );
   }
 
+  function trackingSuppressed() {
+    return config.respectDoNotTrack && hasDoNotTrack();
+  }
+
+  function hasDoNotTrack() {
+    var navigatorValue = window.navigator && window.navigator.doNotTrack;
+    var msValue = window.navigator && window.navigator.msDoNotTrack;
+    var windowValue = window.doNotTrack;
+    var value = navigatorValue || msValue || windowValue;
+    return value === '1' || value === 1 || value === 'yes';
+  }
+
   function validEventName(eventName) {
     return (
       typeof eventName === 'string' &&
@@ -231,6 +244,10 @@
   function send(eventName, properties, userProperties) {
     if (!validConfig()) {
       debug('missing tracker configuration');
+      return Promise.resolve(null);
+    }
+    if (trackingSuppressed()) {
+      debug('do not track is enabled');
       return Promise.resolve(null);
     }
     if (!validEventName(eventName)) {
@@ -278,9 +295,11 @@
   function identify(distinctID, userProperties) {
     if (typeof distinctID === 'string' && distinctID.length > 0) {
       state.distinctID = distinctID;
-      var storage = safeLocalStorage();
-      if (storage) {
-        storageSet(storage, identityStorageKey, distinctID);
+      if (!trackingSuppressed()) {
+        var storage = safeLocalStorage();
+        if (storage) {
+          storageSet(storage, identityStorageKey, distinctID);
+        }
       }
     }
     return send('identify', undefined, userProperties);
