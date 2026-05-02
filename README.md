@@ -30,7 +30,13 @@ upstream applications.
 - Typed Events sort allowlist for query-builder controlled ordering.
 - Typed Events filter field and operator allowlists with invalid-query error classification.
 - Opt-in end-to-end test for collect -> Redis Stream -> ingestion -> ClickHouse -> Realtime/Events reader.
-- Dependency-free browser tracker SDK for auto pageview, SPA route pageview, manual track, identify, debug logging, and snippet queue replay.
+
+## Go Library Boundary
+
+- `analytics-core` is a Go module for analytics data-plane reuse, not a deployable SimpleTrack business service.
+- Public packages live at the module root, such as `collect`, `eventbus`, `ingestion`, `storage`, and `contracts`.
+- Runtime services should import root-level packages from `github.com/simpletrack/analytics-core/...`.
+- Product responsibilities such as write-key resolution, site permissions, subscription limits, CORS policy, and tracker hosting belong to the consuming service.
 
 ## Queue Semantics
 
@@ -46,18 +52,10 @@ upstream applications.
 ## HTTP API
 
 - The event reporting hot path uses fasthttp as the mature third-party HTTP library.
-- `internal/collect/httpapi` only decodes JSON, maps HTTP status codes, and calls `collect.Handler`.
+- `collect/httpapi` only decodes JSON, maps HTTP status codes, and calls `collect.Handler`.
 - P1 exposes `POST /collect` as the stable event reporting route; health and query routes are added separately from the reporting hot path.
 - `collect.Handler` remains framework-independent so future gRPC, SDK, or worker entrypoints can reuse the same validation and publish path.
 - Event and user properties are accepted as bounded scalar bags in P1; nested objects and arrays wait for the explicit property storage model.
-
-## Browser SDK
-
-- `sdk/browser/tracker.js` is the P1 browser tracker for websites and docs snippets.
-- It reads `data-tenant-id`, `data-project-id`, `data-source-id`, and `data-collect-url` from the script tag and posts the stable collect request shape to `POST /collect`.
-- It sends an automatic `pageview`, patches SPA history changes for route pageviews, attaches allowlisted UTM/click-id query parameters, exposes `window.simpletrack.track(name, properties)`, exposes `window.simpletrack.identify(id, userProperties)`, and can suppress sends when opt-in DNT handling is enabled.
-- The SDK does not add cookies. It stores the current `distinct_id` in `localStorage` when available and falls back to an in-memory id when storage is blocked.
-- Browser SDK tests run with Node's built-in test runner and a fake browser window, so the SDK remains dependency-free.
 
 ## Storage Boundaries
 
@@ -87,7 +85,6 @@ Run the standard verification set:
 go test ./...
 go test -run Example ./...
 go vet ./...
-node --test sdk/browser/tracker.test.mjs
 ```
 
 When network access is unstable, set the local proxy before dependency commands:
@@ -121,7 +118,7 @@ Run Redis Stream integration tests against the local Redis container:
 
 ```powershell
 $env:ANALYTICS_CORE_REDIS_ADDR='127.0.0.1:26379'
-go test ./internal/eventbus/redisstream
+go test ./eventbus/redisstream
 ```
 
 Run the full P1 data-pipeline end-to-end test against Redis, MySQL, and ClickHouse:
