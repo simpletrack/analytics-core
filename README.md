@@ -30,6 +30,7 @@ upstream applications.
 - Typed Events sort allowlist for query-builder controlled ordering.
 - Typed Events filter field and operator allowlists with invalid-query error classification.
 - Opt-in end-to-end test for collect -> Redis Stream -> ingestion -> ClickHouse -> Realtime/Events reader.
+- Dependency-free browser tracker SDK for auto pageview, SPA route pageview, manual track, identify, debug logging, and snippet queue replay.
 
 ## Queue Semantics
 
@@ -49,6 +50,14 @@ upstream applications.
 - P1 exposes `POST /collect` as the stable event reporting route; health and query routes are added separately from the reporting hot path.
 - `collect.Handler` remains framework-independent so future gRPC, SDK, or worker entrypoints can reuse the same validation and publish path.
 - Event and user properties are accepted as bounded scalar bags in P1; nested objects and arrays wait for the explicit property storage model.
+
+## Browser SDK
+
+- `sdk/browser/tracker.js` is the P1 browser tracker for websites and docs snippets.
+- It reads `data-tenant-id`, `data-project-id`, `data-source-id`, and `data-collect-url` from the script tag and posts the stable collect request shape to `POST /collect`.
+- It sends an automatic `pageview`, patches SPA history changes for route pageviews, exposes `window.simpletrack.track(name, properties)`, and exposes `window.simpletrack.identify(id, userProperties)`.
+- The SDK does not add cookies. It stores the current `distinct_id` in `localStorage` when available and falls back to an in-memory id when storage is blocked.
+- Browser SDK tests run with Node's built-in test runner and a fake browser window, so the SDK remains dependency-free.
 
 ## Storage Boundaries
 
@@ -78,6 +87,7 @@ Run the standard verification set:
 go test ./...
 go test -run Example ./...
 go vet ./...
+node --test sdk/browser/tracker.test.mjs
 ```
 
 When network access is unstable, set the local proxy before dependency commands:
