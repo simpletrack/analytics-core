@@ -33,11 +33,10 @@ var propertyInsertColumns = []string{
 
 // PropertyBatchWriter writes typed event and user properties to ClickHouse.
 //
-// The writer is deliberately separate from BatchWriter in P1 so the event-row
-// commit path keeps its existing idempotency semantics while the property
-// physical model is still being reviewed. Ingestion can later compose both
-// writers behind a stronger storage unit once retry and duplicate behavior are
-// agreed.
+// The writer stays separate from BatchWriter so the event-row commit path keeps
+// its existing idempotency semantics. Production ingestion can compose both
+// writers through storage.PropertyIndexingEventWriter without teaching queue
+// workers about ClickHouse property tables.
 type PropertyBatchWriter struct {
 	router       *TableRouter     // router resolves tenant/project/source to the matching event table family
 	prepareBatch prepareBatchFunc // prepareBatch opens one native ClickHouse batch for one property table

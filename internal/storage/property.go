@@ -78,6 +78,29 @@ type EventPropertyWriter interface {
 	WriteEventProperties(context.Context, []EventPropertyRecord) (PropertyWriteResult, error)
 }
 
+// PropertyWriteGuard starts and finalizes the durable idempotency record for property indexing.
+//
+// Property indexing needs its own checkpoint because the event row may already
+// be committed even when the property batch fails. The guard lets retries repair
+// that partial outcome without rewriting already indexed properties.
+type PropertyWriteGuard interface {
+	// StartPropertyWrite claims the event id before the property batch starts.
+	StartPropertyWrite(context.Context, contracts.EventEnvelope) (PropertyWriteClaim, error)
+}
+
+// PropertyWriteClaim is the per-event idempotency claim returned by PropertyWriteGuard.
+//
+// A claim should be keyed by tenant_id, project_id, source_id, and event_id so
+// property retries converge on the same checkpoint as the event writer.
+type PropertyWriteClaim interface {
+	// AlreadyInserted reports whether the property rows were previously committed.
+	AlreadyInserted() bool
+	// Commit marks the claimed property index as durably inserted after the batch succeeds.
+	Commit(context.Context) error
+	// Rollback records the failed property batch so the next retry can reclaim it.
+	Rollback(context.Context, error) error
+}
+
 // FlattenEventProperties converts event and user property maps into typed rows.
 //
 // Flattening is deterministic: event properties are emitted before user

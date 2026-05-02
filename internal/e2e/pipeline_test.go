@@ -56,11 +56,14 @@ func TestCollectToRealtimeAndEventsPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("route test table failed: %v", err)
 	}
+	propertyTableName := table.Physical + "_properties"
 	createEventTable(ctx, t, clickConn, table.Physical)
+	createPropertyTable(ctx, t, clickConn, propertyTableName)
 
 	// Build the production-shaped pipeline: collect publishes to Redis Stream,
-	// Processor consumes through EventBus, and BatchWriter commits to ClickHouse
-	// with MySQL-backed idempotency.
+	// Processor consumes through EventBus, the primary BatchWriter commits the
+	// event row with MySQL-backed idempotency, and the storage decorator writes
+	// typed property rows after the event exists.
 	stream := "analytics_core_e2e_" + key.SourceID
 	bus, err := redisstream.New(redisClient, redisstream.Options{
 		Stream:         stream,
@@ -84,9 +87,24 @@ func TestCollectToRealtimeAndEventsPipeline(t *testing.T) {
 	if err := guard.AutoMigrate(ctx); err != nil {
 		t.Fatalf("migrate ingestion status failed: %v", err)
 	}
-	writer, err := clickhouse.NewBatchWriter(clickConn, router, clickhouse.WithEventWriteGuard(guard))
+	propertyGuard, err := mysql.NewPropertyIndexingStatusGuard(mysqlDB)
+	if err != nil {
+		t.Fatalf("new property indexing status guard failed: %v", err)
+	}
+	if err := propertyGuard.AutoMigrate(ctx); err != nil {
+		t.Fatalf("migrate property indexing status failed: %v", err)
+	}
+	eventWriter, err := clickhouse.NewBatchWriter(clickConn, router, clickhouse.WithEventWriteGuard(guard))
 	if err != nil {
 		t.Fatalf("new clickhouse batch writer failed: %v", err)
+	}
+	propertyWriter, err := clickhouse.NewPropertyBatchWriter(clickConn, router)
+	if err != nil {
+		t.Fatalf("new clickhouse property writer failed: %v", err)
+	}
+	writer, err := storage.NewPropertyIndexingEventWriter(eventWriter, propertyWriter, propertyGuard)
+	if err != nil {
+		t.Fatalf("new property indexing event writer failed: %v", err)
 	}
 	processor, err := ingestion.NewProcessor(bus, eventbus.ConsumerGroup{
 		Name:     "analytics-core-e2e",
@@ -134,7 +152,10 @@ func TestCollectToRealtimeAndEventsPipeline(t *testing.T) {
 		t.Fatalf("collect custom event failed: %v", err)
 	}
 
-	builder, err := clickhouse.NewEventQueryBuilder(router)
+	builder, err := clickhouse.NewEventQueryBuilder(router, clickhouse.WithAllowedPropertyFilters(
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "plan"},
+	))
 	if err != nil {
 		t.Fatalf("new event query builder failed: %v", err)
 	}
@@ -175,6 +196,32 @@ func TestCollectToRealtimeAndEventsPipeline(t *testing.T) {
 	assertEventRecord(t, events, customEvent.ID, []string{`"button":"hero"`}, []string{`"plan":"free"`})
 	assertEventRecord(t, realtime, pageview.ID, []string{`"path":"/"`}, nil)
 	assertEventRecord(t, realtime, customEvent.ID, []string{`"button":"hero"`}, []string{`"plan":"free"`})
+	filtered := waitForEvents(ctx, t, reader, storage.EventListQuery{
+		TenantID:  key.TenantID,
+		ProjectID: key.ProjectID,
+		SourceID:  key.SourceID,
+		From:      eventTime.Add(-time.Minute),
+		To:        eventTime.Add(time.Minute),
+		Limit:     10,
+		PropertyFilters: []storage.EventPropertyFilter{
+			{
+				Scope:       storage.PropertyScopeEvent,
+				Name:        "button",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "hero",
+			},
+			{
+				Scope:       storage.PropertyScopeUser,
+				Name:        "plan",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "free",
+			},
+		},
+	})
+	assertOnlyEventIDs(t, filtered, customEvent.ID)
+	assertEventRecord(t, filtered, customEvent.ID, []string{`"button":"hero"`}, []string{`"plan":"free"`})
 
 	stopProcessor()
 	if err := <-processorDone; err != nil && !errors.Is(err, context.Canceled) {
@@ -250,6 +297,29 @@ func TestPropertyBatchWriterToClickHouse(t *testing.T) {
 	if result.Rows != len(propertyRecords) {
 		t.Fatalf("property rows = %d, want %d", result.Rows, len(propertyRecords))
 	}
+	otherEnvelope := envelope
+	otherEnvelope.ID = "evt_property_other_" + key.SourceID
+	otherEnvelope.EventName = "checkout_clicked"
+	otherEnvelope.Properties = map[string]any{"button": "footer", "score": 13}
+	otherEnvelope.UserProps = map[string]any{"beta": false, "plan": "paid"}
+	otherEventResult, err := eventWriter.WriteEvent(ctx, otherEnvelope)
+	if err != nil {
+		t.Fatalf("write nonmatching event failed: %v", err)
+	}
+	if !otherEventResult.Inserted {
+		t.Fatal("nonmatching property e2e event write should insert a fresh event")
+	}
+	otherPropertyRecords, err := storage.FlattenEventProperties(otherEnvelope)
+	if err != nil {
+		t.Fatalf("flatten nonmatching event properties failed: %v", err)
+	}
+	otherResult, err := writer.WriteEventProperties(ctx, otherPropertyRecords)
+	if err != nil {
+		t.Fatalf("write nonmatching event properties failed: %v", err)
+	}
+	if otherResult.Rows != len(otherPropertyRecords) {
+		t.Fatalf("nonmatching property rows = %d, want %d", otherResult.Rows, len(otherPropertyRecords))
+	}
 
 	var rows []propertyResultRow
 	waitForCondition(ctx, t, func() (bool, error) {
@@ -298,6 +368,7 @@ func TestPropertyBatchWriterToClickHouse(t *testing.T) {
 			},
 		},
 	})
+	assertOnlyEventIDs(t, filtered, envelope.ID)
 	assertEventRecord(t, filtered, envelope.ID, []string{`"button":"hero"`}, []string{`"plan":"free"`})
 }
 
@@ -477,8 +548,8 @@ func createPropertyTable(ctx context.Context, t *testing.T, conn driver.Conn, ta
 	t.Helper()
 
 	// The property table mirrors storage.EventPropertyRecord. It is created
-	// separately from the event table because property ingestion composition is
-	// still reviewed independently from the main event write path.
+	// beside each routed event table so the e2e can prove both hot-path property
+	// indexing and the standalone property writer.
 	ddl := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
 	event_id String,
@@ -615,6 +686,25 @@ func assertPropertyRow(t *testing.T, rows []propertyResultRow, scope storage.Pro
 		}
 	}
 	t.Fatalf("property %s.%s=%s/%q/%f/%t not found in rows: %#v", scope, name, valueType, stringValue, numberValue, boolValue, rows)
+}
+
+func assertOnlyEventIDs(t *testing.T, records []storage.EventRecord, ids ...string) {
+	t.Helper()
+
+	// Exact id matching prevents filter tests from passing when a query ignores
+	// its filter and merely includes the expected event among extra rows.
+	if len(records) != len(ids) {
+		t.Fatalf("event count = %d, want %d; records: %#v", len(records), len(ids), records)
+	}
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	for _, record := range records {
+		if _, ok := want[record.ID]; !ok {
+			t.Fatalf("unexpected event %q in records: %#v", record.ID, records)
+		}
+	}
 }
 
 func assertEventRecord(t *testing.T, records []storage.EventRecord, eventID string, propertyFragments []string, userPropertyFragments []string) {
