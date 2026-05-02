@@ -62,20 +62,38 @@ type EventFilter struct {
 	Value    string              // Value is always bound as a query argument
 }
 
+// PropertySelector identifies one property that may be used in query predicates.
+type PropertySelector struct {
+	Scope PropertyScope // Scope separates event properties from user properties
+	Name  string        // Name is the normalized property key allowed for querying
+}
+
+// EventPropertyFilter describes one allowlisted typed property predicate.
+type EventPropertyFilter struct {
+	Scope       PropertyScope       // Scope chooses event or user properties
+	Name        string              // Name is the normalized property key
+	ValueType   PropertyValueType   // ValueType selects the typed value slot
+	Operator    EventFilterOperator // Operator chooses one allowlisted comparison
+	StringValue string              // StringValue is used when ValueType is string
+	NumberValue float64             // NumberValue is used when ValueType is number
+	BoolValue   bool                // BoolValue is used when ValueType is bool
+}
+
 // EventListQuery describes one paged Events table query.
 type EventListQuery struct {
-	TenantID      string             // TenantID is the tenant boundary key
-	ProjectID     string             // ProjectID is the project or website boundary key
-	SourceID      string             // SourceID is the source boundary key inside the project
-	EventName     string             // EventName optionally filters to one analytics event name
-	DistinctID    string             // DistinctID optionally filters to one visitor or user key
-	From          time.Time          // From optionally filters events at or after this event time
-	To            time.Time          // To optionally filters events before this event time
-	Limit         int                // Limit caps returned rows before the builder-level maximum
-	Offset        int                // Offset skips rows for Events pagination
-	SortField     EventSortField     // SortField chooses one allowlisted Events sort field
-	SortDirection EventSortDirection // SortDirection chooses asc or desc for SortField
-	Filters       []EventFilter      // Filters are extra allowlisted field/operator/value predicates
+	TenantID        string                // TenantID is the tenant boundary key
+	ProjectID       string                // ProjectID is the project or website boundary key
+	SourceID        string                // SourceID is the source boundary key inside the project
+	EventName       string                // EventName optionally filters to one analytics event name
+	DistinctID      string                // DistinctID optionally filters to one visitor or user key
+	From            time.Time             // From optionally filters events at or after this event time
+	To              time.Time             // To optionally filters events before this event time
+	Limit           int                   // Limit caps returned rows before the builder-level maximum
+	Offset          int                   // Offset skips rows for Events pagination
+	SortField       EventSortField        // SortField chooses one allowlisted Events sort field
+	SortDirection   EventSortDirection    // SortDirection chooses asc or desc for SortField
+	Filters         []EventFilter         // Filters are extra allowlisted field/operator/value predicates
+	PropertyFilters []EventPropertyFilter // PropertyFilters are extra allowlisted typed property predicates
 }
 
 // RealtimeQuery describes the recent-events query used by Realtime.

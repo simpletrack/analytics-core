@@ -172,6 +172,143 @@ func TestEventQueryBuilderUsesFilterAllowlist(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router, WithAllowedPropertyFilters(
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "plan"},
+	))
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		PropertyFilters: []storage.EventPropertyFilter{
+			{
+				Scope:       storage.PropertyScopeEvent,
+				Name:        "button",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "hero",
+			},
+			{
+				Scope:       storage.PropertyScopeUser,
+				Name:        "plan",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterNotEquals,
+				StringValue: "free",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build events query failed: %v", err)
+	}
+
+	propertyTable := plan.PhysicalTable + propertyTableSuffix
+	for _, fragment := range []string{
+		"FROM `" + plan.PhysicalTable + "`",
+		"(tenant_id, project_id, source_id, event_id) IN (SELECT tenant_id, project_id, source_id, event_id FROM `" + propertyTable + "`",
+		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value = ?",
+		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value != ?",
+	} {
+		if !strings.Contains(plan.SQL, fragment) {
+			t.Fatalf("expected SQL fragment %q in %q", fragment, plan.SQL)
+		}
+	}
+	if strings.Contains(plan.SQL, "hero") || strings.Contains(plan.SQL, "free") {
+		t.Fatalf("property values should be bound args, not SQL literals: %s", plan.SQL)
+	}
+	if len(plan.Args) != 18 {
+		t.Fatalf("expected tenant/project/source/property/property/limit args, got %d: %#v", len(plan.Args), plan.Args)
+	}
+}
+
+func TestEventQueryBuilderRejectsInvalidPropertyFilters(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router, WithAllowedPropertyFilters(
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
+	))
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		filter storage.EventPropertyFilter
+		want   string
+	}{
+		{
+			name: "unsupported scope",
+			filter: storage.EventPropertyFilter{
+				Scope:     storage.PropertyScope("session"),
+				Name:      "button",
+				ValueType: storage.PropertyValueString,
+				Operator:  storage.EventFilterEquals,
+			},
+			want: "unsupported property scope",
+		},
+		{
+			name: "not allowlisted",
+			filter: storage.EventPropertyFilter{
+				Scope:     storage.PropertyScopeEvent,
+				Name:      "raw_sql",
+				ValueType: storage.PropertyValueString,
+				Operator:  storage.EventFilterEquals,
+			},
+			want: "is not allowlisted",
+		},
+		{
+			name: "unsupported value type",
+			filter: storage.EventPropertyFilter{
+				Scope:     storage.PropertyScopeEvent,
+				Name:      "button",
+				ValueType: storage.PropertyValueType("json"),
+				Operator:  storage.EventFilterEquals,
+			},
+			want: "unsupported property value type",
+		},
+		{
+			name: "null not equals",
+			filter: storage.EventPropertyFilter{
+				Scope:     storage.PropertyScopeEvent,
+				Name:      "button",
+				ValueType: storage.PropertyValueNull,
+				Operator:  storage.EventFilterNotEquals,
+			},
+			want: "null only supports eq",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+				TenantID:        "tenant_1",
+				ProjectID:       "project_1",
+				SourceID:        "source_1",
+				PropertyFilters: []storage.EventPropertyFilter{tc.filter},
+			})
+			if err == nil {
+				t.Fatal("expected invalid event query error")
+			}
+			if !errors.Is(err, storage.ErrInvalidEventQuery) {
+				t.Fatalf("expected ErrInvalidEventQuery, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestEventQueryBuilderRejectsInvalidQueries(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {

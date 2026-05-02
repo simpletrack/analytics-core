@@ -192,6 +192,7 @@ func TestPropertyBatchWriterToClickHouse(t *testing.T) {
 
 	clickConn := openClickHouseNative(ctx, t)
 	defer clickConn.Close()
+	clickGorm := openClickHouseGORM(ctx, t)
 
 	router, err := clickhouse.NewTableRouter("events")
 	if err != nil {
@@ -203,6 +204,7 @@ func TestPropertyBatchWriterToClickHouse(t *testing.T) {
 		t.Fatalf("route test table failed: %v", err)
 	}
 	propertyTableName := table.Physical + "_properties"
+	createEventTable(ctx, t, clickConn, table.Physical)
 	createPropertyTable(ctx, t, clickConn, propertyTableName)
 
 	writer, err := clickhouse.NewPropertyBatchWriter(clickConn, router)
@@ -225,6 +227,17 @@ func TestPropertyBatchWriterToClickHouse(t *testing.T) {
 		Properties: map[string]any{"button": "hero", "score": 42.5},
 		UserProps:  map[string]any{"beta": true, "plan": "free"},
 		Source:     "e2e-test",
+	}
+	eventWriter, err := clickhouse.NewBatchWriter(clickConn, router)
+	if err != nil {
+		t.Fatalf("new clickhouse event writer failed: %v", err)
+	}
+	eventResult, err := eventWriter.WriteEvent(ctx, envelope)
+	if err != nil {
+		t.Fatalf("write event failed: %v", err)
+	}
+	if !eventResult.Inserted {
+		t.Fatal("property e2e event write should insert a fresh event")
 	}
 	propertyRecords, err := storage.FlattenEventProperties(envelope)
 	if err != nil {
@@ -249,6 +262,43 @@ func TestPropertyBatchWriterToClickHouse(t *testing.T) {
 	assertPropertyRow(t, rows, storage.PropertyScopeEvent, "score", storage.PropertyValueNumber, "", 42.5, false)
 	assertPropertyRow(t, rows, storage.PropertyScopeUser, "beta", storage.PropertyValueBool, "", 0, true)
 	assertPropertyRow(t, rows, storage.PropertyScopeUser, "plan", storage.PropertyValueString, "free", 0, false)
+
+	builder, err := clickhouse.NewEventQueryBuilder(router, clickhouse.WithAllowedPropertyFilters(
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "plan"},
+	))
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+	reader, err := clickhouse.NewEventReader(clickGorm, builder)
+	if err != nil {
+		t.Fatalf("new event reader failed: %v", err)
+	}
+	filtered := waitForEvents(ctx, t, reader, storage.EventListQuery{
+		TenantID:  key.TenantID,
+		ProjectID: key.ProjectID,
+		SourceID:  key.SourceID,
+		From:      eventTime.Add(-time.Minute),
+		To:        eventTime.Add(time.Minute),
+		Limit:     10,
+		PropertyFilters: []storage.EventPropertyFilter{
+			{
+				Scope:       storage.PropertyScopeEvent,
+				Name:        "button",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "hero",
+			},
+			{
+				Scope:       storage.PropertyScopeUser,
+				Name:        "plan",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "free",
+			},
+		},
+	})
+	assertEventRecord(t, filtered, envelope.ID, []string{`"button":"hero"`}, []string{`"plan":"free"`})
 }
 
 func openRedis(ctx context.Context, t *testing.T) *redis.Client {

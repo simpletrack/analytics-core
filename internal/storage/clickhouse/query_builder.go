@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/simpletrack/analytics-core/internal/storage"
@@ -57,6 +58,12 @@ var eventFilterOperators = map[storage.EventFilterOperator]string{
 	storage.EventFilterNotEquals: "!=",
 }
 
+var propertyValueColumns = map[storage.PropertyValueType]string{
+	storage.PropertyValueString: "string_value",
+	storage.PropertyValueNumber: "number_value",
+	storage.PropertyValueBool:   "bool_value",
+}
+
 // EventQueryBuilderOption customizes the ClickHouse query builder.
 type EventQueryBuilderOption func(*EventQueryBuilder)
 
@@ -74,6 +81,21 @@ func WithMaxQueryLimit(max int) EventQueryBuilderOption {
 	}
 }
 
+// WithAllowedPropertyFilters adds property keys that may be used in Events queries.
+func WithAllowedPropertyFilters(selectors ...storage.PropertySelector) EventQueryBuilderOption {
+	return func(builder *EventQueryBuilder) {
+		if builder.allowedProperties == nil {
+			builder.allowedProperties = make(map[storage.PropertySelector]struct{})
+		}
+		for _, selector := range selectors {
+			normalized, err := normalizePropertySelector(selector.Scope, selector.Name)
+			if err == nil {
+				builder.allowedProperties[normalized] = struct{}{}
+			}
+		}
+	}
+}
+
 // EventQueryBuilder builds ClickHouse Events and Realtime query plans.
 //
 // The builder is intentionally plan-only in P1. Query execution can be added
@@ -81,9 +103,10 @@ func WithMaxQueryLimit(max int) EventQueryBuilderOption {
 // physical tables, GORM internals, or ClickHouse driver details to analysis
 // modules.
 type EventQueryBuilder struct {
-	router   *TableRouter // router resolves tenant/project/source to physical event tables
-	db       *gorm.DB     // db is the GORM builder used in dry-run mode for SQL and args
-	maxLimit int          // maxLimit prevents unbounded product queries
+	router            *TableRouter                          // router resolves tenant/project/source to physical event tables
+	db                *gorm.DB                              // db is the GORM builder used in dry-run mode for SQL and args
+	maxLimit          int                                   // maxLimit prevents unbounded product queries
+	allowedProperties map[storage.PropertySelector]struct{} // allowedProperties is the property filter allowlist
 }
 
 // NewEventQueryBuilder creates a ClickHouse event query builder.
@@ -99,9 +122,10 @@ func NewEventQueryBuilder(router *TableRouter, opts ...EventQueryBuilderOption) 
 		return nil, err
 	}
 	builder := &EventQueryBuilder{
-		router:   router,
-		db:       db,
-		maxLimit: defaultMaxQueryLimit,
+		router:            router,
+		db:                db,
+		maxLimit:          defaultMaxQueryLimit,
+		allowedProperties: make(map[storage.PropertySelector]struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -131,8 +155,8 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 	if !query.From.IsZero() && !query.To.IsZero() && !query.From.Before(query.To) {
 		return storage.EventQueryPlan{}, invalidEventQueryError("from must be before to")
 	}
-	if len(query.Filters) > defaultMaxFilters {
-		return storage.EventQueryPlan{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters), defaultMaxFilters)
+	if len(query.Filters)+len(query.PropertyFilters) > defaultMaxFilters {
+		return storage.EventQueryPlan{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters)+len(query.PropertyFilters), defaultMaxFilters)
 	}
 
 	// Resolve the physical table before touching GORM so dynamic table routing
@@ -163,6 +187,10 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 		scope = scope.Where("distinct_id = ?", query.DistinctID)
 	}
 	scope, err = b.applyEventFilters(scope, query.Filters)
+	if err != nil {
+		return storage.EventQueryPlan{}, err
+	}
+	scope, err = b.applyPropertyFilters(scope, table, query)
 	if err != nil {
 		return storage.EventQueryPlan{}, err
 	}
@@ -224,6 +252,59 @@ func (b *EventQueryBuilder) applyEventFilters(scope *gorm.DB, filters []storage.
 		scope = scope.Where(column+" "+operator+" ?", filter.Value)
 	}
 	return scope, nil
+}
+
+func (b *EventQueryBuilder) applyPropertyFilters(scope *gorm.DB, table Table, query storage.EventListQuery) (*gorm.DB, error) {
+	// Property filters are joined through tuple IN subqueries rather than raw
+	// JSON extraction or correlated EXISTS clauses. ClickHouse executes this
+	// shape without relying on outer-scope aliases, and all caller-controlled
+	// property names and values remain bound parameters.
+	for idx, filter := range query.PropertyFilters {
+		predicate, args, err := b.buildPropertyFilterPredicate(table, query, idx, filter)
+		if err != nil {
+			return nil, err
+		}
+		scope = scope.Where(predicate, args...)
+	}
+	return scope, nil
+}
+
+func (b *EventQueryBuilder) buildPropertyFilterPredicate(table Table, query storage.EventListQuery, idx int, filter storage.EventPropertyFilter) (string, []any, error) {
+	selector, err := normalizePropertySelector(filter.Scope, filter.Name)
+	if err != nil {
+		return "", nil, invalidEventQueryError("property filter %d %v", idx, err)
+	}
+	if _, ok := b.allowedProperties[selector]; !ok {
+		return "", nil, invalidEventQueryError("property filter %d %s.%s is not allowlisted", idx, selector.Scope, selector.Name)
+	}
+	operator, err := normalizeFilterOperator(filter.Operator)
+	if err != nil {
+		return "", nil, err
+	}
+
+	propertyTable := propertyTableFor(table).Physical
+	basePredicate := fmt.Sprintf(
+		"(tenant_id, project_id, source_id, event_id) IN (SELECT tenant_id, project_id, source_id, event_id FROM `%s` WHERE tenant_id = ? AND project_id = ? AND source_id = ? AND property_scope = ? AND property_name = ? AND property_type = ?",
+		propertyTable,
+	)
+	args := []any{query.TenantID, query.ProjectID, query.SourceID, string(selector.Scope), selector.Name, string(filter.ValueType)}
+
+	// Null values are represented by the type marker itself, so there is no
+	// typed value column to compare. Other scalar types use their dedicated
+	// ClickHouse column and a bound comparison value.
+	if filter.ValueType == storage.PropertyValueNull {
+		if filter.Operator != storage.EventFilterEquals {
+			return "", nil, invalidEventQueryError("property filter %d null only supports eq", idx)
+		}
+		return basePredicate + ")", args, nil
+	}
+
+	column, value, err := propertyValueColumnAndArg(filter)
+	if err != nil {
+		return "", nil, invalidEventQueryError("property filter %d %v", idx, err)
+	}
+	args = append(args, value)
+	return basePredicate + " AND " + column + " " + operator + " ?)", args, nil
 }
 
 func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
@@ -298,6 +379,36 @@ func normalizeFilterOperator(operator storage.EventFilterOperator) (string, erro
 		return "", invalidEventQueryError("unsupported events filter operator %q", operator)
 	}
 	return sqlOperator, nil
+}
+
+func normalizePropertySelector(scope storage.PropertyScope, name string) (storage.PropertySelector, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return storage.PropertySelector{}, errors.New("property name is required")
+	}
+	switch scope {
+	case storage.PropertyScopeEvent, storage.PropertyScopeUser:
+		return storage.PropertySelector{Scope: scope, Name: name}, nil
+	default:
+		return storage.PropertySelector{}, fmt.Errorf("unsupported property scope %q", scope)
+	}
+}
+
+func propertyValueColumnAndArg(filter storage.EventPropertyFilter) (string, any, error) {
+	column, ok := propertyValueColumns[filter.ValueType]
+	if !ok {
+		return "", nil, fmt.Errorf("unsupported property value type %q", filter.ValueType)
+	}
+	switch filter.ValueType {
+	case storage.PropertyValueString:
+		return column, filter.StringValue, nil
+	case storage.PropertyValueNumber:
+		return column, filter.NumberValue, nil
+	case storage.PropertyValueBool:
+		return column, filter.BoolValue, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported property value type %q", filter.ValueType)
+	}
 }
 
 func invalidEventQueryError(format string, args ...any) error {
