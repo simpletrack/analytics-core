@@ -229,6 +229,41 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderUsesQueryScopedPropertyAllowlist(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		AllowedPropertySelectors: []storage.PropertySelector{
+			{Scope: storage.PropertyScopeEvent, Name: "button"},
+		},
+		PropertyFilters: []storage.EventPropertyFilter{
+			{
+				Scope:       storage.PropertyScopeEvent,
+				Name:        "button",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "hero",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build events query with query-scoped allowlist failed: %v", err)
+	}
+	if !strings.Contains(plan.SQL, "property_scope = ? AND property_name = ? AND property_type = ? AND string_value = ?") {
+		t.Fatalf("expected property predicate in %q", plan.SQL)
+	}
+}
+
 func TestEventQueryBuilderRejectsInvalidPropertyFilters(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {

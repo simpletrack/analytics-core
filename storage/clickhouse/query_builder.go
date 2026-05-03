@@ -274,7 +274,7 @@ func (b *EventQueryBuilder) buildPropertyFilterPredicate(table Table, query stor
 	if err != nil {
 		return "", nil, invalidEventQueryError("property filter %d %v", idx, err)
 	}
-	if _, ok := b.allowedProperties[selector]; !ok {
+	if !b.propertySelectorAllowed(query, selector) {
 		return "", nil, invalidEventQueryError("property filter %d %s.%s is not allowlisted", idx, selector.Scope, selector.Name)
 	}
 	operator, err := normalizeFilterOperator(filter.Operator)
@@ -308,6 +308,27 @@ func (b *EventQueryBuilder) buildPropertyFilterPredicate(table Table, query stor
 	}
 	args = append(args, value)
 	return basePredicate + " AND " + column + " " + operator + " ?)", args, nil
+}
+
+func (b *EventQueryBuilder) propertySelectorAllowed(query storage.EventListQuery, selector storage.PropertySelector) bool {
+	// Builder-level allowlists cover static deployments, while query-level
+	// allowlists let a runtime service carry the current source config through
+	// the storage-neutral query contract.
+	if _, ok := b.allowedProperties[selector]; ok {
+		return true
+	}
+	// Normalize query-provided selectors with the same rules as filters so
+	// whitespace or invalid scopes do not widen the property surface.
+	for _, allowed := range query.AllowedPropertySelectors {
+		normalized, err := normalizePropertySelector(allowed.Scope, allowed.Name)
+		if err != nil {
+			continue
+		}
+		if normalized == selector {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
