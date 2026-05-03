@@ -282,10 +282,13 @@ func (b *EventQueryBuilder) buildPropertyFilterPredicate(table Table, query stor
 		return "", nil, err
 	}
 
-	propertyTable := propertyTableFor(table).Physical
+	propertyTable, err := PropertyTableFor(table)
+	if err != nil {
+		return "", nil, err
+	}
 	basePredicate := fmt.Sprintf(
 		"(tenant_id, project_id, source_id, event_id) IN (SELECT tenant_id, project_id, source_id, event_id FROM `%s` WHERE tenant_id = ? AND project_id = ? AND source_id = ? AND property_scope = ? AND property_name = ? AND property_type = ?",
-		propertyTable,
+		propertyTable.Physical,
 	)
 	args := []any{query.TenantID, query.ProjectID, query.SourceID, string(selector.Scope), selector.Name, string(filter.ValueType)}
 

@@ -12,21 +12,7 @@ import (
 	"github.com/simpletrack/analytics-core/storage"
 )
 
-var eventInsertColumns = []string{
-	"event_id",
-	"tenant_id",
-	"project_id",
-	"source_id",
-	"source_type",
-	"event_name",
-	"distinct_id",
-	"session_id",
-	"event_time",
-	"received_at",
-	"properties",
-	"user_properties",
-	"source",
-}
+var eventInsertColumns = eventColumnNames()
 
 // BatchWriterOption customizes BatchWriter dependencies without exposing the
 // ClickHouse driver or status-store implementation to ingestion.

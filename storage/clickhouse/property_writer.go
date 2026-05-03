@@ -11,25 +11,7 @@ import (
 
 const propertyTableSuffix = "_properties"
 
-var propertyInsertColumns = []string{
-	"event_id",
-	"tenant_id",
-	"project_id",
-	"source_id",
-	"source_type",
-	"event_name",
-	"distinct_id",
-	"session_id",
-	"event_time",
-	"received_at",
-	"source",
-	"property_scope",
-	"property_name",
-	"property_type",
-	"string_value",
-	"number_value",
-	"bool_value",
-}
+var propertyInsertColumns = propertyColumnNames()
 
 // PropertyBatchWriter writes typed event and user properties to ClickHouse.
 //
@@ -129,7 +111,7 @@ func (w *PropertyBatchWriter) routePropertyRecord(record storage.EventPropertyRe
 	if err != nil {
 		return Table{}, err
 	}
-	return propertyTableFor(table), nil
+	return PropertyTableFor(table)
 }
 
 func (w *PropertyBatchWriter) writePropertyGroup(ctx context.Context, table Table, records []storage.EventPropertyRecord) error {
@@ -152,13 +134,6 @@ func (w *PropertyBatchWriter) writePropertyGroup(ctx context.Context, table Tabl
 		return err
 	}
 	return nil
-}
-
-func propertyTableFor(table Table) Table {
-	return Table{
-		Logical:  defaultLogicalTable + propertyTableSuffix,
-		Physical: table.Physical + propertyTableSuffix,
-	}
 }
 
 func propertyInsertValues(record storage.EventPropertyRecord) []any {
