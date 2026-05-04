@@ -2,7 +2,11 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strconv"
+	"time"
 
 	"github.com/simpletrack/analytics-core/storage"
 	"gorm.io/gorm"
@@ -92,5 +96,25 @@ func (row eventRowModel) toRecord() storage.EventRecord {
 		Properties:     row.Properties,
 		UserProperties: row.UserProperties,
 		Source:         row.Source,
+		VisitID:        deriveVisitID(row.SessionID, row.EventTime),
 	}
+}
+
+// deriveVisitID reconstructs a stable visit key from the session key and the
+// current 30-minute collect window used by the provisional session resolver.
+//
+// NOTE: This helper is readback-only. It stays independent from table-routing
+// hashes so a future routing change cannot alter the public visit_id format.
+func deriveVisitID(sessionID string, eventTime time.Time) string {
+	if sessionID == "" || eventTime.IsZero() {
+		return ""
+	}
+	bucket := eventTime.UTC().Truncate(30 * time.Minute).Unix()
+	return "vis_" + visitDigest(sessionID, bucket)
+}
+
+// visitDigest returns a dedicated 128-bit digest for provisional visit IDs.
+func visitDigest(sessionID string, bucket int64) string {
+	sum := sha256.Sum256([]byte(sessionID + ":" + strconv.FormatInt(bucket, 10)))
+	return hex.EncodeToString(sum[:16])
 }

@@ -125,6 +125,7 @@ type EventRecord struct {
 	EventName      string    // EventName is the analytics event name
 	DistinctID     string    // DistinctID is the visitor or user identity key
 	SessionID      string    // SessionID is the optional session key
+	VisitID        string    // VisitID is the optional visit key derived for readback analytics
 	EventTime      time.Time // EventTime is the timestamp produced by the source
 	ReceivedAt     time.Time // ReceivedAt is the timestamp accepted by collect
 	Properties     string    // Properties is the serialized event-scoped JSON payload
