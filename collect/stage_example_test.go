@@ -54,27 +54,30 @@ func ExampleNewVisitResolverStage() {
 func ExampleNewClientEnrichmentStage() {
 	bus := direct.New()
 	stage, _ := collect.NewClientEnrichmentStage(collect.ClientEnrichmentConfig{
-		HashSalt:         "deployment-secret",
-		IncludeUserAgent: true,
-		IncludeIPHash:    true,
+		HashSalt:           "deployment-secret",
+		IncludeUserAgent:   true,
+		IncludeIPHash:      true,
+		IncludeBrowserInfo: true,
 	})
 	handler, _ := collect.NewHandlerWithOptions(bus, func() time.Time {
 		return time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
 	}, collect.WithStages(stage))
 	request := exampleRequest()
 	request.Client = collect.ClientInfo{
-		UserAgent: "Mozilla/5.0",
+		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 		IP:        "203.0.113.10",
 	}
 
 	envelope, _ := handler.Handle(context.Background(), request)
 
-	fmt.Println(envelope.Properties["client.user_agent"])
+	fmt.Println(strings.HasPrefix(envelope.Properties["client.user_agent"].(string), "Mozilla/5.0"))
 	fmt.Println(strings.HasPrefix(envelope.Properties["client.ip_hash"].(string), "ip_"))
+	fmt.Println(envelope.Properties["client.browser"])
 
 	// Output:
-	// Mozilla/5.0
 	// true
+	// true
+	// Chrome
 }
 
 func ExampleNewTrafficFilterStage() {

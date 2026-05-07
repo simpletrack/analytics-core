@@ -125,10 +125,14 @@ func TestVisitResolverPreservesExplicitVisitID(t *testing.T) {
 func TestClientEnrichmentAddsDerivedProperties(t *testing.T) {
 	bus := newRecordingBus()
 	stage, err := NewClientEnrichmentStage(ClientEnrichmentConfig{
-		HashSalt:         "hash-salt",
-		IncludeUserAgent: true,
-		IncludeIPHash:    true,
-		IncludeReferrer:  true,
+		HashSalt:           "hash-salt",
+		IncludeUserAgent:   true,
+		IncludeIPHash:      true,
+		IncludeReferrer:    true,
+		IncludeBrowserInfo: true,
+		IncludeGeoInfo:     true,
+		UserAgentParser:    stubUserAgentParser{},
+		GeoResolver:        stubGeoResolver{},
 	})
 	if err != nil {
 		t.Fatalf("new client enrichment stage failed: %v", err)
@@ -157,9 +161,27 @@ func TestClientEnrichmentAddsDerivedProperties(t *testing.T) {
 	if envelope.Properties[clientReferrerProperty] != "https://example.com/docs" {
 		t.Fatalf("expected referrer property, got %#v", envelope.Properties[clientReferrerProperty])
 	}
+	if envelope.Properties[clientBrowserProperty] != "Chrome" {
+		t.Fatalf("expected browser property, got %#v", envelope.Properties[clientBrowserProperty])
+	}
+	if envelope.Properties[clientOSProperty] != "Windows" {
+		t.Fatalf("expected os property, got %#v", envelope.Properties[clientOSProperty])
+	}
+	if envelope.Properties[clientDeviceProperty] != "desktop" {
+		t.Fatalf("expected device property, got %#v", envelope.Properties[clientDeviceProperty])
+	}
 	ipHash, _ := envelope.Properties[clientIPHashProperty].(string)
 	if !strings.HasPrefix(ipHash, "ip_") || strings.Contains(ipHash, "203.0.113.10") {
 		t.Fatalf("expected salted IP hash without raw IP, got %q", ipHash)
+	}
+	if envelope.Properties[geoCountryProperty] != "United States" {
+		t.Fatalf("expected country property, got %#v", envelope.Properties[geoCountryProperty])
+	}
+	if envelope.Properties[geoRegionProperty] != "California" {
+		t.Fatalf("expected region property, got %#v", envelope.Properties[geoRegionProperty])
+	}
+	if envelope.Properties[geoCityProperty] != "San Francisco" {
+		t.Fatalf("expected city property, got %#v", envelope.Properties[geoCityProperty])
 	}
 }
 
@@ -188,6 +210,93 @@ func TestClientEnrichmentDoesNotRejectFullPropertyBag(t *testing.T) {
 	}
 	if _, exists := envelope.Properties[clientIPHashProperty]; exists {
 		t.Fatalf("expected generated property to be skipped when bag is full")
+	}
+}
+
+func TestClientEnrichmentUsesDefaultUserAgentParser(t *testing.T) {
+	stage, err := NewClientEnrichmentStage(ClientEnrichmentConfig{
+		IncludeBrowserInfo: true,
+	})
+	if err != nil {
+		t.Fatalf("new client enrichment stage failed: %v", err)
+	}
+	envelope, err := Normalize(validRequest(), time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+
+	envelope, err = stage.Apply(context.Background(), StageInput{
+		Request: Request{Client: ClientInfo{
+			UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+		}},
+	}, envelope)
+	if err != nil {
+		t.Fatalf("stage apply failed: %v", err)
+	}
+
+	if envelope.Properties[clientBrowserProperty] != "Chrome" {
+		t.Fatalf("expected Chrome browser family, got %#v", envelope.Properties[clientBrowserProperty])
+	}
+	if envelope.Properties[clientOSProperty] != "Windows" {
+		t.Fatalf("expected Windows os family, got %#v", envelope.Properties[clientOSProperty])
+	}
+	if envelope.Properties[clientDeviceProperty] != "desktop" {
+		t.Fatalf("expected desktop device family, got %#v", envelope.Properties[clientDeviceProperty])
+	}
+}
+
+func TestDefaultUserAgentParserRecognizesIOSBrowsers(t *testing.T) {
+	parser := defaultUserAgentParser{}
+	cases := []struct {
+		name      string
+		userAgent string
+		browser   string
+		os        string
+		device    string
+	}{
+		{
+			name:      "chrome ios",
+			userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0.0.0 Mobile/15E148 Safari/604.1",
+			browser:   "Chrome",
+			os:        "iOS",
+			device:    "mobile",
+		},
+		{
+			name:      "firefox ios",
+			userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/126.0 Mobile/15E148 Safari/605.1.15",
+			browser:   "Firefox",
+			os:        "iOS",
+			device:    "mobile",
+		},
+		{
+			name:      "edge ios",
+			userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) EdgiOS/126.0 Mobile/15E148 Safari/605.1.15",
+			browser:   "Edge",
+			os:        "iOS",
+			device:    "mobile",
+		},
+		{
+			name:      "opera ios",
+			userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) OPiOS/80.0.4170.45 Mobile/15E148 Safari/605.1.15",
+			browser:   "Opera",
+			os:        "iOS",
+			device:    "mobile",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := parser.Parse(tc.userAgent)
+			if info.Browser != tc.browser {
+				t.Fatalf("expected browser %q, got %#v", tc.browser, info)
+			}
+			if info.OS != tc.os {
+				t.Fatalf("expected os %q, got %#v", tc.os, info)
+			}
+			if info.Device != tc.device {
+				t.Fatalf("expected device %q, got %#v", tc.device, info)
+			}
+		})
 	}
 }
 
@@ -258,12 +367,35 @@ func TestStageConstructorsRejectInvalidConfig(t *testing.T) {
 	if _, err := NewClientEnrichmentStage(ClientEnrichmentConfig{IncludeIPHash: true}); err == nil {
 		t.Fatal("expected client enrichment to require hash salt")
 	}
+	if _, err := NewClientEnrichmentStage(ClientEnrichmentConfig{IncludeGeoInfo: true}); err == nil {
+		t.Fatal("expected client enrichment to require geo resolver")
+	}
 	if _, err := NewTrafficFilterStage(TrafficFilterConfig{InternalCIDRs: []string{"not-a-cidr"}}); err == nil {
 		t.Fatal("expected traffic filter to reject bad CIDR")
 	}
 	if _, err := NewHandlerWithOptions(newRecordingBus(), time.Now, WithStages(nil)); err == nil {
 		t.Fatal("expected nil stage to be rejected")
 	}
+}
+
+type stubUserAgentParser struct{}
+
+func (stubUserAgentParser) Parse(string) UserAgentInfo {
+	return UserAgentInfo{
+		Browser: "Chrome",
+		OS:      "Windows",
+		Device:  "desktop",
+	}
+}
+
+type stubGeoResolver struct{}
+
+func (stubGeoResolver) Resolve(string) (GeoLocation, bool) {
+	return GeoLocation{
+		Country: "United States",
+		Region:  "California",
+		City:    "San Francisco",
+	}, true
 }
 
 func validRequestWithProperties(count int) Request {
