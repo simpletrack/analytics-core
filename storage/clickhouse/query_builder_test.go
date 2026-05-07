@@ -235,6 +235,92 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderCombinesScalarVisitSortAndPropertyFilters(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router, WithAllowedPropertyFilters(
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "score"},
+	))
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	from := time.Date(2026, 5, 3, 4, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:      "tenant_1",
+		ProjectID:     "project_1",
+		SourceID:      "source_1",
+		EventName:     "signup_clicked",
+		DistinctID:    "visitor_1",
+		From:          from,
+		To:            to,
+		Limit:         51,
+		Offset:        25,
+		SortField:     storage.EventSortByEventName,
+		SortDirection: storage.EventSortAscending,
+		Filters: []storage.EventFilter{
+			{
+				Field:    storage.EventFilterByVisitID,
+				Operator: storage.EventFilterEquals,
+				Value:    "visit_2",
+			},
+		},
+		PropertyFilters: []storage.EventPropertyFilter{
+			{
+				Scope:       storage.PropertyScopeEvent,
+				Name:        "button",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "hero",
+			},
+			{
+				Scope:       storage.PropertyScopeUser,
+				Name:        "score",
+				ValueType:   storage.PropertyValueNumber,
+				Operator:    storage.EventFilterNotEquals,
+				NumberValue: 42,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build events query failed: %v", err)
+	}
+
+	propertyTable := plan.PhysicalTable + propertyTableSuffix
+	for _, fragment := range []string{
+		"event_time >= ?",
+		"event_time < ?",
+		"event_name = ?",
+		"distinct_id = ?",
+		"visit_id = ?",
+		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value = ?",
+		"property_scope = ? AND property_name = ? AND property_type = ? AND number_value != ?",
+		"(tenant_id, project_id, source_id, event_id) IN (SELECT tenant_id, project_id, source_id, event_id FROM `" + propertyTable + "`",
+		"ORDER BY event_name ASC,event_time DESC",
+		"LIMIT ?",
+		"OFFSET ?",
+	} {
+		if !strings.Contains(plan.SQL, fragment) {
+			t.Fatalf("expected SQL fragment %q in %q", fragment, plan.SQL)
+		}
+	}
+	for _, literal := range []string{"tenant_1", "signup_clicked", "visitor_1", "visit_2", "hero"} {
+		if strings.Contains(plan.SQL, literal) {
+			t.Fatalf("query should bind %q instead of embedding it: %s", literal, plan.SQL)
+		}
+	}
+	if plan.Limit != 51 {
+		t.Fatalf("expected effective limit 51, got %d", plan.Limit)
+	}
+	if len(plan.Args) != 24 {
+		t.Fatalf("expected combined scalar/property/paging args, got %d: %#v", len(plan.Args), plan.Args)
+	}
+}
+
 func TestEventQueryBuilderUsesQueryScopedPropertyAllowlist(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {
