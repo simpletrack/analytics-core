@@ -212,6 +212,7 @@ func eventInsertValues(envelope contracts.EventEnvelope) ([]any, error) {
 		envelope.EventName,
 		envelope.DistinctID,
 		envelope.SessionID,
+		envelope.VisitID,
 		envelope.EventTime.UTC(),
 		envelope.ReceivedAt.UTC(),
 		properties,

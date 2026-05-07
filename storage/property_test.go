@@ -21,6 +21,7 @@ func TestFlattenEventPropertiesBuildsDeterministicTypedRows(t *testing.T) {
 		EventName:  "signup",
 		DistinctID: "visitor_1",
 		SessionID:  "session_1",
+		VisitID:    "visit_1",
 		EventTime:  eventTime,
 		ReceivedAt: receivedAt,
 		Source:     "browser",
@@ -59,6 +60,9 @@ func TestFlattenEventPropertiesBuildsDeterministicTypedRows(t *testing.T) {
 		}
 		if got.Source != "browser" {
 			t.Fatalf("record %d source = %q, want browser", idx, got.Source)
+		}
+		if got.VisitID != "visit_1" {
+			t.Fatalf("record %d visit id = %q, want visit_1", idx, got.VisitID)
 		}
 		if got.EventTime != eventTime.UTC() || got.ReceivedAt != receivedAt.UTC() {
 			t.Fatalf("record %d timestamps = %s/%s, want UTC copies", idx, got.EventTime, got.ReceivedAt)

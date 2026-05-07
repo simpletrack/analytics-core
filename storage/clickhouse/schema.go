@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	eventTableOrderBy    = "tenant_id, project_id, source_id, event_time, event_id"
-	propertyTableOrderBy = "tenant_id, project_id, source_id, property_scope, property_name, event_time, event_id"
+	eventTableOrderBy    = "tenant_id, project_id, source_id, event_time, visit_id, event_id"
+	propertyTableOrderBy = "tenant_id, project_id, source_id, property_scope, property_name, event_time, visit_id, event_id"
 )
 
 var eventTableColumns = []schemaColumn{
@@ -20,6 +20,7 @@ var eventTableColumns = []schemaColumn{
 	{name: "event_name", typeName: "String"},
 	{name: "distinct_id", typeName: "String"},
 	{name: "session_id", typeName: "String"},
+	{name: "visit_id", typeName: "String"},
 	{name: "event_time", typeName: "DateTime64(3, 'UTC')"},
 	{name: "received_at", typeName: "DateTime64(3, 'UTC')"},
 	{name: "properties", typeName: "String"},
@@ -36,6 +37,7 @@ var propertyTableColumns = []schemaColumn{
 	{name: "event_name", typeName: "String"},
 	{name: "distinct_id", typeName: "String"},
 	{name: "session_id", typeName: "String"},
+	{name: "visit_id", typeName: "String"},
 	{name: "event_time", typeName: "DateTime64(3, 'UTC')"},
 	{name: "received_at", typeName: "DateTime64(3, 'UTC')"},
 	{name: "source", typeName: "String"},

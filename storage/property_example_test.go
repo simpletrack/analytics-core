@@ -16,6 +16,7 @@ func ExampleFlattenEventProperties() {
 		SourceType: "web",
 		EventName:  "signup",
 		DistinctID: "visitor_1",
+		VisitID:    "visit_1",
 		EventTime:  time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC),
 		ReceivedAt: time.Date(2026, 5, 1, 8, 0, 1, 0, time.UTC),
 		Properties: map[string]any{"button": "hero"},

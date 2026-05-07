@@ -16,7 +16,7 @@ func TestCreateEventTableStatementUsesWriterColumnContract(t *testing.T) {
 			t.Fatalf("event DDL does not contain writer column %q: %s", column, ddl)
 		}
 	}
-	if !strings.Contains(ddl, "ORDER BY (tenant_id, project_id, source_id, event_time, event_id)") {
+	if !strings.Contains(ddl, "ORDER BY (tenant_id, project_id, source_id, event_time, visit_id, event_id)") {
 		t.Fatalf("event DDL does not contain expected order key: %s", ddl)
 	}
 }
@@ -32,7 +32,7 @@ func TestCreatePropertyTableStatementUsesWriterColumnContract(t *testing.T) {
 			t.Fatalf("property DDL does not contain writer column %q: %s", column, ddl)
 		}
 	}
-	if !strings.Contains(ddl, "ORDER BY (tenant_id, project_id, source_id, property_scope, property_name, event_time, event_id)") {
+	if !strings.Contains(ddl, "ORDER BY (tenant_id, project_id, source_id, property_scope, property_name, event_time, visit_id, event_id)") {
 		t.Fatalf("property DDL does not contain expected order key: %s", ddl)
 	}
 }

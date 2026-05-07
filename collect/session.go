@@ -12,6 +12,8 @@ import (
 
 const defaultSessionWindow = 30 * time.Minute
 
+const defaultVisitWindow = defaultSessionWindow
+
 // SessionResolverConfig configures privacy-friendly session id derivation.
 type SessionResolverConfig struct {
 	Salt                     string        // Salt namespaces derived ids and prevents cross-installation joins
@@ -66,6 +68,64 @@ func (s sessionResolverStage) Apply(_ context.Context, input StageInput, envelop
 
 	envelope.SessionID = fmt.Sprintf("ses_%s", saltedDigest("session", s.config.Salt, parts...)[:32])
 	if err := validateIdentifier("session_id", envelope.SessionID); err != nil {
+		return contracts.EventEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+// VisitResolverConfig configures canonical analytics visit id derivation.
+type VisitResolverConfig struct {
+	Salt   string        // Salt namespaces derived visit ids and prevents cross-installation joins
+	Window time.Duration // Window is the deterministic activity bucket used when no visit id is supplied
+}
+
+// NewVisitResolverStage creates a Stage that fills missing visit ids.
+//
+// Visit ids are the canonical analytics visit key used by Realtime, Events,
+// Sessions, Funnels, Journeys, and Retention. The resolver preserves explicit
+// SDK-provided visit ids, and only derives a salted server-side value when the
+// collect request omits one.
+func NewVisitResolverStage(config VisitResolverConfig) (Stage, error) {
+	// Validate server-only derivation material before any events can be accepted.
+	if config.Salt == "" {
+		return nil, errors.New("visit resolver salt is required")
+	}
+
+	// Normalize the window once at construction so per-event derivation is cheap
+	// and deterministic across retries.
+	if config.Window == 0 {
+		config.Window = defaultVisitWindow
+	}
+	if config.Window < time.Minute {
+		return nil, errors.New("visit resolver window must be at least one minute")
+	}
+	return visitResolverStage{config: config}, nil
+}
+
+// visitResolverStage fills canonical visit ids without coupling collect to a product runtime.
+type visitResolverStage struct {
+	config VisitResolverConfig // config keeps visit derivation deterministic and privacy bounded
+}
+
+func (s visitResolverStage) Apply(_ context.Context, _ StageInput, envelope contracts.EventEnvelope) (contracts.EventEnvelope, error) {
+	if envelope.VisitID != "" {
+		return envelope, nil
+	}
+
+	// Derive from the persisted analytics scope and event-time bucket so queue
+	// retries, delayed ingestion, and server restarts keep the same visit key.
+	bucket := envelope.EventTime.UTC().Truncate(s.config.Window).Unix()
+	parts := []string{
+		envelope.TenantID,
+		envelope.ProjectID,
+		envelope.SourceID,
+		envelope.DistinctID,
+		envelope.SessionID,
+		strconv.FormatInt(bucket, 10),
+	}
+
+	envelope.VisitID = fmt.Sprintf("vis_%s", saltedDigest("visit", s.config.Salt, parts...)[:32])
+	if err := validateIdentifier("visit_id", envelope.VisitID); err != nil {
 		return contracts.EventEnvelope{}, err
 	}
 	return envelope, nil

@@ -38,6 +38,7 @@ const (
 	EventFilterByEventName  EventFilterField = "event_name"  // EventFilterByEventName filters by the analytics event name.
 	EventFilterByDistinctID EventFilterField = "distinct_id" // EventFilterByDistinctID filters by the visitor or user identity key.
 	EventFilterBySessionID  EventFilterField = "session_id"  // EventFilterBySessionID filters by the optional session key.
+	EventFilterByVisitID    EventFilterField = "visit_id"    // EventFilterByVisitID filters by the canonical analytics visit key.
 	EventFilterBySourceType EventFilterField = "source_type" // EventFilterBySourceType filters by the source category such as web, server, or mobile.
 )
 
@@ -121,7 +122,7 @@ type EventRecord struct {
 	EventName      string    // EventName is the analytics event name
 	DistinctID     string    // DistinctID is the visitor or user identity key
 	SessionID      string    // SessionID is the optional session key
-	VisitID        string    // VisitID is the optional visit key derived for readback analytics
+	VisitID        string    // VisitID is the canonical analytics visit key read from storage
 	EventTime      time.Time // EventTime is the timestamp produced by the source
 	ReceivedAt     time.Time // ReceivedAt is the timestamp accepted by collect
 	Properties     string    // Properties is the serialized event-scoped JSON payload

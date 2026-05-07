@@ -29,6 +29,28 @@ func ExampleNewSessionResolverStage() {
 	// true
 }
 
+func ExampleNewVisitResolverStage() {
+	bus := direct.New()
+	sessionStage, _ := collect.NewSessionResolverStage(collect.SessionResolverConfig{
+		Salt:   "deployment-session-secret",
+		Window: 30 * time.Minute,
+	})
+	visitStage, _ := collect.NewVisitResolverStage(collect.VisitResolverConfig{
+		Salt:   "deployment-visit-secret",
+		Window: 30 * time.Minute,
+	})
+	handler, _ := collect.NewHandlerWithOptions(bus, func() time.Time {
+		return time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	}, collect.WithStages(sessionStage, visitStage))
+
+	envelope, _ := handler.Handle(context.Background(), exampleRequest())
+
+	fmt.Println(strings.HasPrefix(envelope.VisitID, "vis_"))
+
+	// Output:
+	// true
+}
+
 func ExampleNewClientEnrichmentStage() {
 	bus := direct.New()
 	stage, _ := collect.NewClientEnrichmentStage(collect.ClientEnrichmentConfig{

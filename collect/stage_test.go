@@ -62,6 +62,66 @@ func TestSessionResolverPreservesExplicitSessionID(t *testing.T) {
 	}
 }
 
+func TestHandlerDerivesVisitIDWhenMissing(t *testing.T) {
+	bus := newRecordingBus()
+	now := time.Date(2026, 5, 3, 10, 5, 0, 0, time.UTC)
+	sessionResolver, err := NewSessionResolverStage(SessionResolverConfig{
+		Salt:   "session-salt",
+		Window: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("new session resolver failed: %v", err)
+	}
+	visitResolver, err := NewVisitResolverStage(VisitResolverConfig{
+		Salt:   "visit-salt",
+		Window: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("new visit resolver failed: %v", err)
+	}
+	handler, err := NewHandlerWithOptions(bus, func() time.Time { return now }, WithStages(sessionResolver, visitResolver))
+	if err != nil {
+		t.Fatalf("new handler failed: %v", err)
+	}
+
+	envelope, err := handler.Handle(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("handle failed: %v", err)
+	}
+
+	if !strings.HasPrefix(envelope.VisitID, "vis_") {
+		t.Fatalf("expected derived visit id, got %q", envelope.VisitID)
+	}
+	if len(bus.published) != 1 || bus.published[0].VisitID != envelope.VisitID {
+		t.Fatalf("expected derived visit id to be published")
+	}
+}
+
+func TestVisitResolverPreservesExplicitVisitID(t *testing.T) {
+	bus := newRecordingBus()
+	resolver, err := NewVisitResolverStage(VisitResolverConfig{Salt: "visit-salt"})
+	if err != nil {
+		t.Fatalf("new visit resolver failed: %v", err)
+	}
+	handler, err := NewHandlerWithOptions(bus, func() time.Time {
+		return time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+	}, WithStages(resolver))
+	if err != nil {
+		t.Fatalf("new handler failed: %v", err)
+	}
+	request := validRequest()
+	request.VisitID = "sdk_visit_1"
+
+	envelope, err := handler.Handle(context.Background(), request)
+	if err != nil {
+		t.Fatalf("handle failed: %v", err)
+	}
+
+	if envelope.VisitID != "sdk_visit_1" {
+		t.Fatalf("expected explicit visit id to win, got %q", envelope.VisitID)
+	}
+}
+
 func TestClientEnrichmentAddsDerivedProperties(t *testing.T) {
 	bus := newRecordingBus()
 	stage, err := NewClientEnrichmentStage(ClientEnrichmentConfig{
@@ -191,6 +251,9 @@ func TestTrafficFilterDropsInternalCIDR(t *testing.T) {
 func TestStageConstructorsRejectInvalidConfig(t *testing.T) {
 	if _, err := NewSessionResolverStage(SessionResolverConfig{}); err == nil {
 		t.Fatal("expected session resolver to require salt")
+	}
+	if _, err := NewVisitResolverStage(VisitResolverConfig{}); err == nil {
+		t.Fatal("expected visit resolver to require salt")
 	}
 	if _, err := NewClientEnrichmentStage(ClientEnrichmentConfig{IncludeIPHash: true}); err == nil {
 		t.Fatal("expected client enrichment to require hash salt")

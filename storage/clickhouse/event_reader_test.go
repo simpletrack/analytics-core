@@ -54,6 +54,7 @@ func TestEventReaderListEventsExecutesQueryPlan(t *testing.T) {
 			"page_view",
 			"visitor_1",
 			"session_1",
+			"visit_1",
 			eventTime,
 			receivedAt,
 			`{"path":"/"}`,
@@ -71,33 +72,14 @@ func TestEventReaderListEventsExecutesQueryPlan(t *testing.T) {
 	if got := records[0].ID; got != "evt_1" {
 		t.Fatalf("expected event id evt_1, got %q", got)
 	}
-	if got, want := records[0].VisitID, deriveVisitID("session_1", eventTime); got != want {
-		t.Fatalf("expected derived visit id %q, got %q", want, got)
+	if got, want := records[0].VisitID, "visit_1"; got != want {
+		t.Fatalf("expected stored visit id %q, got %q", want, got)
 	}
 	if got := records[0].Properties; got != `{"path":"/"}` {
 		t.Fatalf("expected properties JSON, got %q", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
-func TestDeriveVisitIDUsesThirtyMinuteUTCWindows(t *testing.T) {
-	sessionID := "session_1"
-	base := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
-	sameBucket := base.Add(29*time.Minute + 59*time.Second)
-	nextBucket := base.Add(30 * time.Minute)
-	localInstant := time.Date(2026, 5, 1, 17, 15, 0, 0, time.FixedZone("UTC+9", 9*60*60))
-
-	baseID := deriveVisitID(sessionID, base)
-	if got := deriveVisitID(sessionID, sameBucket); got != baseID {
-		t.Fatalf("expected same UTC bucket to keep visit id %q, got %q", baseID, got)
-	}
-	if got := deriveVisitID(sessionID, nextBucket); got == baseID {
-		t.Fatalf("expected next UTC bucket to change visit id, kept %q", got)
-	}
-	if got, want := deriveVisitID(sessionID, localInstant), deriveVisitID(sessionID, localInstant.UTC()); got != want {
-		t.Fatalf("expected UTC normalization to keep visit id %q, got %q", want, got)
 	}
 }
 
@@ -178,6 +160,7 @@ func newEventRows() *sqlmock.Rows {
 		"event_name",
 		"distinct_id",
 		"session_id",
+		"visit_id",
 		"event_time",
 		"received_at",
 		"properties",

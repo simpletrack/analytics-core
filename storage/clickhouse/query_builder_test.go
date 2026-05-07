@@ -149,6 +149,11 @@ func TestEventQueryBuilderUsesFilterAllowlist(t *testing.T) {
 				Value:    "session_1",
 			},
 			{
+				Field:    storage.EventFilterByVisitID,
+				Operator: storage.EventFilterEquals,
+				Value:    "visit_1",
+			},
+			{
 				Field:    storage.EventFilterBySourceType,
 				Operator: storage.EventFilterNotEquals,
 				Value:    "server",
@@ -161,13 +166,14 @@ func TestEventQueryBuilderUsesFilterAllowlist(t *testing.T) {
 
 	for _, fragment := range []string{
 		"session_id = ?",
+		"visit_id = ?",
 		"source_type != ?",
 	} {
 		if !strings.Contains(plan.SQL, fragment) {
 			t.Fatalf("expected SQL fragment %q in %q", fragment, plan.SQL)
 		}
 	}
-	if len(plan.Args) != 6 {
+	if len(plan.Args) != 7 {
 		t.Fatalf("expected tenant/project/source/filter/filter/limit args, got %d: %#v", len(plan.Args), plan.Args)
 	}
 }

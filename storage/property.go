@@ -52,6 +52,7 @@ type EventPropertyRecord struct {
 	EventName   string            // EventName is the analytics event name
 	DistinctID  string            // DistinctID is the visitor or user identity key
 	SessionID   string            // SessionID is the optional session key
+	VisitID     string            // VisitID is the canonical analytics visit key
 	EventTime   time.Time         // EventTime is the timestamp produced by the source
 	ReceivedAt  time.Time         // ReceivedAt is the timestamp accepted by collect
 	Source      string            // Source is the optional source label for diagnostics
@@ -116,6 +117,7 @@ func FlattenEventProperties(envelope contracts.EventEnvelope) ([]EventPropertyRe
 		EventName:  envelope.EventName,
 		DistinctID: envelope.DistinctID,
 		SessionID:  envelope.SessionID,
+		VisitID:    envelope.VisitID,
 		EventTime:  envelope.EventTime.UTC(),
 		ReceivedAt: envelope.ReceivedAt.UTC(),
 		Source:     envelope.Source,
@@ -144,6 +146,7 @@ type propertyBase struct {
 	EventName  string    // EventName is copied to every flattened property row
 	DistinctID string    // DistinctID is copied to every flattened property row
 	SessionID  string    // SessionID is copied to every flattened property row
+	VisitID    string    // VisitID is copied to every flattened property row
 	EventTime  time.Time // EventTime is copied to every flattened property row
 	ReceivedAt time.Time // ReceivedAt is copied to every flattened property row
 	Source     string    // Source is copied to every flattened property row
@@ -183,6 +186,7 @@ func newPropertyRecord(base propertyBase, scope PropertyScope, name string, valu
 		EventName:  base.EventName,
 		DistinctID: base.DistinctID,
 		SessionID:  base.SessionID,
+		VisitID:    base.VisitID,
 		EventTime:  base.EventTime,
 		ReceivedAt: base.ReceivedAt,
 		Source:     base.Source,

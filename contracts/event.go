@@ -12,6 +12,7 @@ type EventEnvelope struct {
 	EventName  string         `json:"event_name"`                // EventName is the analytics event name
 	DistinctID string         `json:"distinct_id"`               // DistinctID is the visitor or user identity key
 	SessionID  string         `json:"session_id,omitempty"`      // SessionID is the optional session key
+	VisitID    string         `json:"visit_id,omitempty"`        // VisitID is the canonical analytics visit key
 	EventTime  time.Time      `json:"event_time"`                // EventTime is the timestamp produced by the source
 	ReceivedAt time.Time      `json:"received_at"`               // ReceivedAt is the timestamp accepted by collect
 	Properties map[string]any `json:"properties,omitempty"`      // Properties are event-scoped properties

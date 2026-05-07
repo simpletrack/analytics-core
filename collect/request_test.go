@@ -21,6 +21,7 @@ func TestNormalizeReturnsEventEnvelope(t *testing.T) {
 		EventName:  "page.view",
 		DistinctID: "visitor_1",
 		SessionID:  "session_1",
+		VisitID:    "visit_1",
 		EventTime:  eventTime,
 		Properties: map[string]any{"path": "/"},
 		UserProps:  map[string]any{"plan": "free"},
@@ -41,6 +42,9 @@ func TestNormalizeReturnsEventEnvelope(t *testing.T) {
 	}
 	if envelope.UserProps["plan"] != "free" {
 		t.Fatalf("expected user property to be copied")
+	}
+	if envelope.VisitID != "visit_1" {
+		t.Fatalf("expected visit id to be copied")
 	}
 }
 

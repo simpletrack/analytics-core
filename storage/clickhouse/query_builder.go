@@ -28,6 +28,7 @@ var eventSelectColumns = []string{
 	"event_name",
 	"distinct_id",
 	"session_id",
+	"visit_id",
 	"event_time",
 	"received_at",
 	"properties",
@@ -50,6 +51,7 @@ var eventFilterColumns = map[storage.EventFilterField]string{
 	storage.EventFilterByEventName:  "event_name",
 	storage.EventFilterByDistinctID: "distinct_id",
 	storage.EventFilterBySessionID:  "session_id",
+	storage.EventFilterByVisitID:    "visit_id",
 	storage.EventFilterBySourceType: "source_type",
 }
 
@@ -490,6 +492,7 @@ type eventRowModel struct {
 	EventName      string    `gorm:"column:event_name"`      // EventName is the analytics event name
 	DistinctID     string    `gorm:"column:distinct_id"`     // DistinctID is the visitor or user key
 	SessionID      string    `gorm:"column:session_id"`      // SessionID is the optional session key
+	VisitID        string    `gorm:"column:visit_id"`        // VisitID is the canonical analytics visit key
 	EventTime      time.Time `gorm:"column:event_time"`      // EventTime is the timestamp produced by the source
 	ReceivedAt     time.Time `gorm:"column:received_at"`     // ReceivedAt is the timestamp accepted by collect
 	Properties     string    `gorm:"column:properties"`      // Properties is the serialized event property payload

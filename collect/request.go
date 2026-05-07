@@ -53,7 +53,7 @@ var (
 //
 // Request carries the JSON field names of the public collect protocol, but it
 // stays independent from HTTP framework types so collect.Handler can be reused
-// outside fasthttp.
+// outside framework-specific request contexts.
 type Request struct {
 	ID         string         `json:"id"`                        // ID is the stable event id used for idempotent ingestion.
 	TenantID   string         `json:"tenant_id"`                 // TenantID is the tenant boundary key.
@@ -63,6 +63,7 @@ type Request struct {
 	EventName  string         `json:"event_name"`                // EventName is the analytics event name.
 	DistinctID string         `json:"distinct_id"`               // DistinctID is the visitor or user identity key.
 	SessionID  string         `json:"session_id,omitempty"`      // SessionID is the optional session key.
+	VisitID    string         `json:"visit_id,omitempty"`        // VisitID is the optional canonical analytics visit key.
 	EventTime  time.Time      `json:"event_time,omitempty"`      // EventTime is when the source says the event happened, for example a browser click timestamp.
 	Properties map[string]any `json:"properties,omitempty"`      // Properties are event-scoped properties.
 	UserProps  map[string]any `json:"user_properties,omitempty"` // UserProps are user-scoped properties.
@@ -122,6 +123,11 @@ func Normalize(request Request, receivedAt time.Time) (contracts.EventEnvelope, 
 			return contracts.EventEnvelope{}, err
 		}
 	}
+	if request.VisitID != "" {
+		if err := validateIdentifier("visit_id", request.VisitID); err != nil {
+			return contracts.EventEnvelope{}, err
+		}
+	}
 	if err := validateProperties("properties", request.Properties); err != nil {
 		return contracts.EventEnvelope{}, err
 	}
@@ -153,6 +159,7 @@ func Normalize(request Request, receivedAt time.Time) (contracts.EventEnvelope, 
 		EventName:  request.EventName,
 		DistinctID: request.DistinctID,
 		SessionID:  request.SessionID,
+		VisitID:    request.VisitID,
 		EventTime:  eventTime.UTC(),
 		ReceivedAt: receivedAt.UTC(),
 		Properties: cloneMap(request.Properties),
@@ -170,6 +177,7 @@ func trimRequest(request Request) Request {
 	request.EventName = strings.TrimSpace(request.EventName)
 	request.DistinctID = strings.TrimSpace(request.DistinctID)
 	request.SessionID = strings.TrimSpace(request.SessionID)
+	request.VisitID = strings.TrimSpace(request.VisitID)
 	request.Source = strings.TrimSpace(request.Source)
 	request.Client = normalizeClientInfo(request.Client)
 	return request

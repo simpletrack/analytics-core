@@ -146,6 +146,7 @@ func propertyInsertValues(record storage.EventPropertyRecord) []any {
 		record.EventName,
 		record.DistinctID,
 		record.SessionID,
+		record.VisitID,
 		record.EventTime.UTC(),
 		record.ReceivedAt.UTC(),
 		record.Source,
