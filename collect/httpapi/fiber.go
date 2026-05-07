@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/simpletrack/analytics-core/collect"
-	"github.com/valyala/fasthttp"
 )
 
 const contentTypeJSON = "application/json"
 
-// CollectHandlerOption configures the fasthttp collect boundary.
+// CollectHandlerOption configures the Fiber collect boundary.
 type CollectHandlerOption func(*collectHandlerConfig)
 
 // AcceptedResponse is returned when collect accepts an event for ingestion.
@@ -32,7 +32,7 @@ type ErrorResponse struct {
 //
 // Enable this only behind a trusted proxy that overwrites incoming
 // X-Forwarded-For and X-Real-IP headers. Direct internet-facing deployments
-// should keep the default RemoteIP-only behavior so clients cannot spoof
+// should keep the default transport address behavior so clients cannot spoof
 // internal traffic filters or salted IP hashes.
 func WithTrustedProxyHeaders() CollectHandlerOption {
 	return func(config *collectHandlerConfig) {
@@ -40,34 +40,32 @@ func WithTrustedProxyHeaders() CollectHandlerOption {
 	}
 }
 
-// NewCollectHandler creates a fasthttp handler for the POST /collect API.
+// NewCollectHandler creates a Fiber handler for the POST /collect API.
 //
 // The handler is intentionally thin: it translates HTTP into collect.Request
 // and delegates validation plus EventBus publishing to collect.Handler. Keeping
-// fasthttp.RequestCtx at this boundary prevents HTTP concerns from leaking into
-// the analytics data-plane core.
-func NewCollectHandler(handler *collect.Handler, opts ...CollectHandlerOption) fasthttp.RequestHandler {
+// Fiber Ctx at this boundary prevents HTTP concerns from leaking into the
+// analytics data-plane core.
+func NewCollectHandler(handler *collect.Handler, opts ...CollectHandlerOption) fiber.Handler {
 	config := newCollectHandlerConfig(opts...)
-	return func(ctx *fasthttp.RequestCtx) {
+	return func(ctx fiber.Ctx) error {
 		if handler == nil {
-			writeJSON(ctx, fasthttp.StatusInternalServerError, ErrorResponse{Error: "collect handler is required"})
-			return
+			return writeJSON(ctx, fiber.StatusInternalServerError, ErrorResponse{Error: "collect handler is required"})
 		}
+
 		// POST is the only event reporting method in P1, which keeps retries and
 		// client SDK behavior predictable while query APIs are designed separately.
-		if !ctx.IsPost() {
-			writeJSON(ctx, fasthttp.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
-			return
+		if ctx.Method() != fiber.MethodPost {
+			return writeJSON(ctx, fiber.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
 		}
 
 		var request collect.Request
-		if err := json.Unmarshal(ctx.PostBody(), &request); err != nil {
-			writeJSON(ctx, fasthttp.StatusBadRequest, ErrorResponse{Error: "invalid collect payload"})
-			return
+		if err := json.Unmarshal(ctx.Body(), &request); err != nil {
+			return writeJSON(ctx, fiber.StatusBadRequest, ErrorResponse{Error: "invalid collect payload"})
 		}
 		request.Client = clientInfoFromRequest(ctx, config)
 
-		envelope, err := handler.Handle(ctx, request)
+		envelope, err := handler.Handle(ctx.Context(), request)
 		if err != nil {
 			// Validation failures are client errors; publish failures are server
 			// errors because the event was syntactically valid but not accepted.
@@ -76,65 +74,62 @@ func NewCollectHandler(handler *collect.Handler, opts ...CollectHandlerOption) f
 				if envelope.ID == "" {
 					envelope = filteredErr.Envelope
 				}
-				writeJSON(ctx, fasthttp.StatusAccepted, AcceptedResponse{
+				return writeJSON(ctx, fiber.StatusAccepted, AcceptedResponse{
 					ID:         envelope.ID,
 					ReceivedAt: envelope.ReceivedAt.Format(time.RFC3339Nano),
 					Filtered:   true,
 				})
-				return
 			}
 			var validationErr collect.ValidationError
 			if errors.As(err, &validationErr) {
-				writeJSON(ctx, fasthttp.StatusBadRequest, ErrorResponse{Error: validationErr.Error()})
-				return
+				return writeJSON(ctx, fiber.StatusBadRequest, ErrorResponse{Error: validationErr.Error()})
 			}
-			writeJSON(ctx, fasthttp.StatusInternalServerError, ErrorResponse{Error: err.Error()})
-			return
+			return writeJSON(ctx, fiber.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 		}
 
-		writeJSON(ctx, fasthttp.StatusAccepted, AcceptedResponse{
+		return writeJSON(ctx, fiber.StatusAccepted, AcceptedResponse{
 			ID:         envelope.ID,
 			ReceivedAt: envelope.ReceivedAt.Format(time.RFC3339Nano),
 		})
 	}
 }
 
-// NewCollectRoute creates a minimal fasthttp route guard for a collect path.
-//
-// P1 has a single event reporting hot path, so a path guard avoids bringing a
-// low-activity router dependency into analytics-core before there is a real
-// routing surface to justify it.
-func NewCollectRoute(path string, handler *collect.Handler, opts ...CollectHandlerOption) (fasthttp.RequestHandler, error) {
+// RegisterCollectRoute registers the collect route on an existing Fiber app.
+func RegisterCollectRoute(app *fiber.App, path string, handler *collect.Handler, opts ...CollectHandlerOption) error {
+	if app == nil {
+		return errors.New("fiber app is required")
+	}
 	if path == "" {
-		return nil, errors.New("collect path is required")
+		return errors.New("collect path is required")
 	}
 
-	collectHandler := NewCollectHandler(handler, opts...)
-	return func(ctx *fasthttp.RequestCtx) {
-		if string(ctx.Path()) != path {
-			writeJSON(ctx, fasthttp.StatusNotFound, ErrorResponse{Error: "not found"})
-			return
-		}
-		collectHandler(ctx)
-	}, nil
+	app.All(path, NewCollectHandler(handler, opts...))
+	return nil
+}
+
+// NewCollectApp creates a minimal Fiber app for one collect route.
+func NewCollectApp(path string, handler *collect.Handler, opts ...CollectHandlerOption) (*fiber.App, error) {
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(ctx fiber.Ctx, err error) error {
+			return writeJSON(ctx, fiber.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		},
+	})
+	if err := RegisterCollectRoute(app, path, handler, opts...); err != nil {
+		return nil, err
+	}
+	app.Use(func(ctx fiber.Ctx) error {
+		return writeJSON(ctx, fiber.StatusNotFound, ErrorResponse{Error: "not found"})
+	})
+	return app, nil
 }
 
 // writeJSON writes the stable JSON response shape for collect endpoints.
-func writeJSON(ctx *fasthttp.RequestCtx, statusCode int, response any) {
-	ctx.SetStatusCode(statusCode)
-	ctx.Response.Header.SetContentType(contentTypeJSON)
-
-	payload, err := json.Marshal(response)
-	if err != nil {
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
-		ctx.SetBodyString(`{"error":"failed to encode response"}`)
-		return
-	}
-	ctx.SetBody(payload)
+func writeJSON(ctx fiber.Ctx, statusCode int, response any) error {
+	return ctx.Status(statusCode).JSON(response, contentTypeJSON)
 }
 
 type collectHandlerConfig struct {
-	trustForwardedHeaders bool // trustForwardedHeaders enables proxy-provided client address headers
+	trustForwardedHeaders bool // trustForwardedHeaders enables proxy-provided client address headers.
 }
 
 func newCollectHandlerConfig(opts ...CollectHandlerOption) collectHandlerConfig {
@@ -149,7 +144,7 @@ func newCollectHandlerConfig(opts ...CollectHandlerOption) collectHandlerConfig 
 	return config
 }
 
-func clientInfoFromRequest(ctx *fasthttp.RequestCtx, config collectHandlerConfig) collect.ClientInfo {
+func clientInfoFromRequest(ctx fiber.Ctx, config collectHandlerConfig) collect.ClientInfo {
 	if ctx == nil {
 		return collect.ClientInfo{}
 	}
@@ -158,36 +153,33 @@ func clientInfoFromRequest(ctx *fasthttp.RequestCtx, config collectHandlerConfig
 	// adapter decides which address source is trustworthy, while collect decides
 	// whether the metadata should become a derived property or filter input.
 	return collect.ClientInfo{
-		UserAgent: string(ctx.UserAgent()),
+		UserAgent: ctx.Get("User-Agent"),
 		IP:        clientIPFromRequest(ctx, config),
-		Referrer:  string(ctx.Request.Header.Peek("Referer")),
+		Referrer:  ctx.Get("Referer"),
 	}
 }
 
-func clientIPFromRequest(ctx *fasthttp.RequestCtx, config collectHandlerConfig) string {
+func clientIPFromRequest(ctx fiber.Ctx, config collectHandlerConfig) string {
 	// Forwarded address headers are only trustworthy when an upstream proxy is
 	// known to strip caller-supplied values. The default direct mode uses the
 	// transport remote address to keep filters and hashes resistant to spoofing.
 	if config.trustForwardedHeaders {
-		if forwarded := firstHeaderValue(ctx.Request.Header.Peek("X-Forwarded-For")); forwarded != "" {
+		if forwarded := firstHeaderValue(ctx.Get("X-Forwarded-For")); forwarded != "" {
 			if addr := canonicalClientIP(forwarded); addr != "" {
 				return addr
 			}
 		}
-		if realIP := strings.TrimSpace(string(ctx.Request.Header.Peek("X-Real-IP"))); realIP != "" {
+		if realIP := strings.TrimSpace(ctx.Get("X-Real-IP")); realIP != "" {
 			if addr := canonicalClientIP(realIP); addr != "" {
 				return addr
 			}
 		}
 	}
-	if remoteIP := ctx.RemoteIP(); remoteIP != nil {
-		return canonicalClientIP(remoteIP.String())
-	}
-	return ""
+	return canonicalClientIP(ctx.IP())
 }
 
-func firstHeaderValue(value []byte) string {
-	text := strings.TrimSpace(string(value))
+func firstHeaderValue(value string) string {
+	text := strings.TrimSpace(value)
 	if text == "" {
 		return ""
 	}
@@ -203,7 +195,7 @@ func canonicalClientIP(value string) string {
 		return ""
 	}
 
-	// Accept either bare addresses or address:port values from fasthttp. Invalid
+	// Accept either bare addresses or address:port values from Fiber. Invalid
 	// values are dropped instead of being passed into filtering or hash inputs.
 	if addr, err := netip.ParseAddr(value); err == nil {
 		return addr.String()

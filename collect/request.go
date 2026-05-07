@@ -23,10 +23,30 @@ const (
 )
 
 var (
-	eventNamePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
-	identifierPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	// eventNamePattern requires an ASCII letter or digit first, then permits
+	// only ASCII letters, digits, underscore, dot, colon, or hyphen. This keeps
+	// event names path-friendly and metric-friendly. Examples: "pageview",
+	// "checkout.completed", and "button:click" pass; " pageview",
+	// "checkout completed", and "/pageview" fail.
+	eventNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	// identifierPattern uses the same ASCII identifier alphabet as event names:
+	// the first byte must be a letter or digit, and the rest may also include
+	// underscore, dot, colon, or hyphen. It validates boundary ids carried
+	// through queue, storage, and idempotency keys. Examples: "tenant_1",
+	// "evt-01", and "user:42" pass; empty strings, leading underscores, and
+	// spaces fail.
+	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	// propertyKeyPattern uses the same ASCII key alphabet as identifiers so
+	// property names can be reused by property indexes and filters without
+	// another escaping layer. It validates each event/user property key before
+	// the property map reaches storage. Examples: "page.path" and "plan:tier"
+	// pass; "page path", "$plan", and "properties[]" fail.
 	propertyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
-	sourceTypePattern  = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+	// sourceTypePattern requires a lower-case ASCII letter first, then permits
+	// lower-case ASCII letters, digits, underscore, or hyphen. This keeps source
+	// categories lower-case for stable filtering, aggregation, and display.
+	// Examples: "web", "server", and "mobile_app" pass; "Web" fails.
+	sourceTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 )
 
 // Request is the normalized collect input before validation.
@@ -43,7 +63,7 @@ type Request struct {
 	EventName  string         `json:"event_name"`                // EventName is the analytics event name.
 	DistinctID string         `json:"distinct_id"`               // DistinctID is the visitor or user identity key.
 	SessionID  string         `json:"session_id,omitempty"`      // SessionID is the optional session key.
-	EventTime  time.Time      `json:"event_time,omitempty"`      // EventTime is the timestamp produced by the source.
+	EventTime  time.Time      `json:"event_time,omitempty"`      // EventTime is when the source says the event happened, for example a browser click timestamp.
 	Properties map[string]any `json:"properties,omitempty"`      // Properties are event-scoped properties.
 	UserProps  map[string]any `json:"user_properties,omitempty"` // UserProps are user-scoped properties.
 	Source     string         `json:"source,omitempty"`          // Source is an optional diagnostic source label.
@@ -109,10 +129,17 @@ func Normalize(request Request, receivedAt time.Time) (contracts.EventEnvelope, 
 		return contracts.EventEnvelope{}, err
 	}
 
+	// EventTime is source time: for example, a browser SDK may report that a
+	// click happened at 10:00:02. ReceivedAt is server collect time: for example,
+	// this service accepted that same request at 10:00:04 after network latency.
 	eventTime := request.EventTime
 	if eventTime.IsZero() {
+		// When the client omits event_time, use receivedAt so downstream queries
+		// still have one stable event_time instead of a zero timestamp.
 		eventTime = receivedAt
 	}
+	// A small future skew is tolerated for client clock drift, but a far-future
+	// event_time would distort Realtime and Events windows, so reject it here.
 	if eventTime.After(receivedAt.Add(maxClockSkew)) {
 		return contracts.EventEnvelope{}, ValidationError{Field: "event_time", Reason: "too far in the future"}
 	}
@@ -149,6 +176,9 @@ func trimRequest(request Request) Request {
 }
 
 func validateIdentifier(field string, value string) error {
+	// Identifiers use identifierPattern so tenant/project/source/event/user keys
+	// can safely become idempotency and routing keys. Example: "tenant_1" passes;
+	// "_tenant", "tenant 1", and "" fail before the EventBus sees the event.
 	if value == "" {
 		return ValidationError{Field: field, Reason: "is required"}
 	}
@@ -162,6 +192,9 @@ func validateIdentifier(field string, value string) error {
 }
 
 func validateEventName(value string) error {
+	// Event names use the same broad identifier alphabet but have their own
+	// length limit. Example: "checkout.completed" passes; "checkout completed"
+	// fails because spaces make metric names and filters ambiguous.
 	if value == "" {
 		return ValidationError{Field: "event_name", Reason: "is required"}
 	}
@@ -175,6 +208,9 @@ func validateEventName(value string) error {
 }
 
 func validateSourceType(value string) error {
+	// Source types are intentionally lower-case category labels. Example: "web"
+	// and "mobile_app" pass; "Web" fails so filters, aggregations, and product
+	// display do not have to normalize mixed-case categories later.
 	if value == "" {
 		return ValidationError{Field: "source_type", Reason: "is required"}
 	}
@@ -197,7 +233,9 @@ func validateProperties(field string, values map[string]any) error {
 
 	// Validate each key and scalar value independently so future property
 	// dictionaries can trust the collect contract instead of re-sanitizing raw
-	// SDK input.
+	// SDK input. Example: {"page.path": "/docs", "paid": true} passes; a key
+	// such as "page path" fails propertyKeyPattern, and a nested object fails the
+	// scalar value check.
 	for key, value := range values {
 		if err := validatePropertyKey(field, key); err != nil {
 			return err
