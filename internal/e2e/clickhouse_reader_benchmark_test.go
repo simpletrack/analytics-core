@@ -27,7 +27,8 @@ const clickHouseBenchmarkRowsEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS"
 //
 // The benchmark is opt-in because it depends on docker-compose ClickHouse. It
 // complements the builder-only benchmark by measuring actual GORM Raw execution
-// and ClickHouse read latency for the same low, medium, and high query shapes.
+// and ClickHouse read latency for recent-window Realtime, wide-since Realtime,
+// medium scalar Events, and high property-filtered Events query shapes.
 func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	if os.Getenv(clickHouseBenchmarkEnabledEnv) != "1" {
 		b.Skipf("set %s=1 to run real ClickHouse EventReader benchmark", clickHouseBenchmarkEnabledEnv)
@@ -76,24 +77,47 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	}
 
 	baseTime := benchmarkBaseTime()
+	recentRealtimeSince := benchmarkRecentRealtimeSince(rowCount)
+	wideRealtimeSince := baseTime.Add(-time.Minute)
 	scenarios := []struct {
-		name  string
-		read  func(context.Context) ([]storage.EventRecord, error)
-		check func(*testing.B, []storage.EventRecord)
+		name                 string
+		realtimeSince        time.Time
+		realtimeEligibleRows int
+		read                 func(context.Context) ([]storage.EventRecord, error)
+		check                func(*testing.B, []storage.EventRecord)
 	}{
 		{
-			name: "low_realtime",
+			name:                 "low_realtime_recent_window",
+			realtimeSince:        recentRealtimeSince,
+			realtimeEligibleRows: 300,
 			read: func(ctx context.Context) ([]storage.EventRecord, error) {
 				return reader.ListRealtime(ctx, storage.RealtimeQuery{
 					TenantID:  key.TenantID,
 					ProjectID: key.ProjectID,
 					SourceID:  key.SourceID,
-					Since:     baseTime.Add(-time.Minute),
+					Since:     recentRealtimeSince,
 					Limit:     50,
 				})
 			},
 			check: func(b *testing.B, records []storage.EventRecord) {
-				assertBenchmarkRealtimeRows(b, records, key, rowCount)
+				assertBenchmarkRealtimeRows(b, records, key, rowCount, recentRealtimeSince, 300)
+			},
+		},
+		{
+			name:                 "low_realtime_wide_since",
+			realtimeSince:        wideRealtimeSince,
+			realtimeEligibleRows: rowCount,
+			read: func(ctx context.Context) ([]storage.EventRecord, error) {
+				return reader.ListRealtime(ctx, storage.RealtimeQuery{
+					TenantID:  key.TenantID,
+					ProjectID: key.ProjectID,
+					SourceID:  key.SourceID,
+					Since:     wideRealtimeSince,
+					Limit:     50,
+				})
+			},
+			check: func(b *testing.B, records []storage.EventRecord) {
+				assertBenchmarkRealtimeRows(b, records, key, rowCount, wideRealtimeSince, rowCount)
 			},
 		},
 		{
@@ -150,6 +174,11 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	for _, scenario := range scenarios {
 		scenario := scenario
 		b.Run(scenario.name, func(b *testing.B) {
+			if !scenario.realtimeSince.IsZero() {
+				assertBenchmarkRealtimeEvidence(b, rowCount, scenario.realtimeSince, scenario.realtimeEligibleRows)
+				b.Logf("realtime window evidence: since=%s eligible_rows=%d row_count=%d", scenario.realtimeSince.Format(time.RFC3339), scenario.realtimeEligibleRows, rowCount)
+			}
+
 			records, err := scenario.read(context.Background())
 			if err != nil {
 				b.Fatalf("preflight read failed: %v", err)
@@ -211,18 +240,38 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 	}
 
 	baseTime := benchmarkBaseTime()
+	recentRealtimeSince := benchmarkRecentRealtimeSince(rowCount)
+	wideRealtimeSince := baseTime.Add(-time.Minute)
 	scenarios := []struct {
-		name string
-		plan func(context.Context) (storage.EventQueryPlan, error)
+		name                 string
+		realtimeSince        time.Time
+		realtimeEligibleRows int
+		plan                 func(context.Context) (storage.EventQueryPlan, error)
 	}{
 		{
-			name: "low_realtime",
+			name:                 "low_realtime_recent_window",
+			realtimeSince:        recentRealtimeSince,
+			realtimeEligibleRows: 300,
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
 				return builder.BuildRealtimeQuery(ctx, storage.RealtimeQuery{
 					TenantID:  key.TenantID,
 					ProjectID: key.ProjectID,
 					SourceID:  key.SourceID,
-					Since:     baseTime.Add(-time.Minute),
+					Since:     recentRealtimeSince,
+					Limit:     50,
+				})
+			},
+		},
+		{
+			name:                 "low_realtime_wide_since",
+			realtimeSince:        wideRealtimeSince,
+			realtimeEligibleRows: rowCount,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildRealtimeQuery(ctx, storage.RealtimeQuery{
+					TenantID:  key.TenantID,
+					ProjectID: key.ProjectID,
+					SourceID:  key.SourceID,
+					Since:     wideRealtimeSince,
 					Limit:     50,
 				})
 			},
@@ -276,6 +325,11 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 	for _, scenario := range scenarios {
 		scenario := scenario
 		t.Run(scenario.name, func(t *testing.T) {
+			if !scenario.realtimeSince.IsZero() {
+				assertBenchmarkRealtimeEvidence(t, rowCount, scenario.realtimeSince, scenario.realtimeEligibleRows)
+				t.Logf("realtime window evidence: since=%s eligible_rows=%d row_count=%d", scenario.realtimeSince.Format(time.RFC3339), scenario.realtimeEligibleRows, rowCount)
+			}
+
 			plan, err := scenario.plan(ctx)
 			if err != nil {
 				t.Fatalf("build query plan failed: %v", err)
@@ -305,6 +359,27 @@ func benchmarkRowCount() int {
 // benchmarkBaseTime returns a stable timestamp anchor for seeded rows.
 func benchmarkBaseTime() time.Time {
 	return time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+}
+
+// benchmarkRecentRealtimeSince returns a bounded recent-window anchor.
+func benchmarkRecentRealtimeSince(rowCount int) time.Time {
+	// Keep the recent-window scenario tied to the newest fixture rows. This
+	// prevents larger pressure runs from accidentally turning Realtime into a
+	// wide historical scan while still returning the latest 50 records.
+	return benchmarkBaseTime().Add(time.Duration(rowCount-300) * time.Second)
+}
+
+// benchmarkEligibleRows returns how many seeded events satisfy since.
+func benchmarkEligibleRows(rowCount int, since time.Time) int {
+	baseTime := benchmarkBaseTime()
+	if !since.After(baseTime) {
+		return rowCount
+	}
+	elapsed := int(since.Sub(baseTime) / time.Second)
+	if elapsed >= rowCount {
+		return 0
+	}
+	return rowCount - elapsed
 }
 
 // openBenchmarkClickHouseNative waits for the native ClickHouse write path.
@@ -606,8 +681,10 @@ func benchmarkEventID(idx int) string {
 }
 
 // assertBenchmarkRealtimeRows verifies the low-pressure Realtime query shape.
-func assertBenchmarkRealtimeRows(b *testing.B, records []storage.EventRecord, key clickhouse.RoutingKey, rowCount int) {
+func assertBenchmarkRealtimeRows(b *testing.B, records []storage.EventRecord, key clickhouse.RoutingKey, rowCount int, since time.Time, expectedEligibleRows int) {
 	b.Helper()
+
+	assertBenchmarkRealtimeEvidence(b, rowCount, since, expectedEligibleRows)
 
 	// Realtime should return the latest 50 rows for the routed source. Checking
 	// the newest event prevents the benchmark from silently timing an unfiltered
@@ -615,6 +692,29 @@ func assertBenchmarkRealtimeRows(b *testing.B, records []storage.EventRecord, ke
 	assertBenchmarkRecordCount(b, records, 50)
 	assertBenchmarkRecord(b, records[0], key, benchmarkEventID(rowCount-1), "", "", "", "", nil, nil)
 	assertBenchmarkRecord(b, records[len(records)-1], key, benchmarkEventID(rowCount-50), "", "", "", "", nil, nil)
+	for _, record := range records {
+		// Returned rows must stay inside the scenario-specific Realtime window;
+		// otherwise the narrow and wide benchmark shapes have collapsed.
+		if record.EventTime.Before(since) {
+			b.Fatalf("realtime row %s is before since %s", record.EventTime.Format(time.RFC3339), since.Format(time.RFC3339))
+		}
+	}
+}
+
+// assertBenchmarkRealtimeEvidence verifies Realtime scenario selectivity.
+func assertBenchmarkRealtimeEvidence(tb testing.TB, rowCount int, since time.Time, expectedEligibleRows int) {
+	tb.Helper()
+
+	// The eligible-row count is intentionally asserted before timing and during
+	// explain logging, so the benchmark cannot silently widen the recent-window
+	// scenario while still returning the same latest 50 records.
+	actualEligibleRows := benchmarkEligibleRows(rowCount, since)
+	if actualEligibleRows != expectedEligibleRows {
+		tb.Fatalf("realtime eligible rows = %d, want %d for since %s", actualEligibleRows, expectedEligibleRows, since.Format(time.RFC3339))
+	}
+	if expectedEligibleRows < 50 {
+		tb.Fatalf("realtime scenario has only %d eligible rows, want at least 50", expectedEligibleRows)
+	}
 }
 
 // assertBenchmarkScalarRows verifies the medium-pressure scalar filter shape.

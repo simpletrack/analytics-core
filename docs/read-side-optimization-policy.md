@@ -106,6 +106,12 @@ $env:ANALYTICS_CORE_CLICKHOUSE_BENCH='1'
 go test ./internal/e2e -run '^$' -bench 'BenchmarkEventReaderClickHouseExecution' -benchmem -count=3
 ```
 
+The reader benchmark intentionally separates recent-window Realtime from
+wide-since Realtime. Each Realtime scenario logs and asserts its `since`
+timestamp and eligible row count before timing, so benchmark evidence cannot
+silently treat a wide historical scan as the product's normal short-window
+Realtime path.
+
 Run write-path comparison benchmarks when a proposal changes ClickHouse event
 write strategy:
 
