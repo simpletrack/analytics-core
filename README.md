@@ -70,6 +70,7 @@ upstream applications.
 - Events sorting is constrained to typed allowlisted fields and directions before SQL generation.
 - Events filtering is constrained to typed allowlisted fields and operators; invalid caller filters return `storage.ErrInvalidEventQuery` before SQL generation.
 - High-throughput event inserts use native ClickHouse batches. GORM is used for query construction and MySQL status storage, not as the default event insert hot path.
+- Read-side ClickHouse acceleration must follow [Read-Side Optimization Policy](docs/read-side-optimization-policy.md) before adding projections, materialized views, or hourly aggregate tables.
 
 ## Development
 
