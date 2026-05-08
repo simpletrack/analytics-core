@@ -67,6 +67,21 @@ func TestEventQueryBuilderBuildsEventsQuery(t *testing.T) {
 	if plan.Limit != 25 {
 		t.Fatalf("expected effective limit 25, got %d", plan.Limit)
 	}
+	if plan.QueryEvidence().Family != storage.EventQueryFamilyEvents {
+		t.Fatalf("expected events evidence family, got %q", plan.QueryEvidence().Family)
+	}
+	if plan.QueryEvidence().ReadPath != storage.EventReadPathFactEvents {
+		t.Fatalf("expected fact-events read path, got %q", plan.QueryEvidence().ReadPath)
+	}
+	if plan.QueryEvidence().Optimization != storage.EventQueryOptimizationDirectFactTable {
+		t.Fatalf("expected direct fact-table optimization, got %q", plan.QueryEvidence().Optimization)
+	}
+	if plan.QueryEvidence().ScalarFilterCount != 4 {
+		t.Fatalf("expected 4 scalar evidence filters, got %d", plan.QueryEvidence().ScalarFilterCount)
+	}
+	if plan.QueryEvidence().UsesPropertyTable {
+		t.Fatal("expected simple events query to avoid the property table")
+	}
 }
 
 func TestEventQueryBuilderBuildsRealtimeQuery(t *testing.T) {
@@ -99,6 +114,24 @@ func TestEventQueryBuilderBuildsRealtimeQuery(t *testing.T) {
 	}
 	if len(plan.Args) != 5 {
 		t.Fatalf("expected tenant/project/source/since/limit args, got %d: %#v", len(plan.Args), plan.Args)
+	}
+	if plan.QueryEvidence().Family != storage.EventQueryFamilyRealtime {
+		t.Fatalf("expected realtime evidence family, got %q", plan.QueryEvidence().Family)
+	}
+	if plan.QueryEvidence().ReadPath != storage.EventReadPathFactEvents {
+		t.Fatalf("expected realtime fact-events read path, got %q", plan.QueryEvidence().ReadPath)
+	}
+	if plan.QueryEvidence().Optimization != storage.EventQueryOptimizationDirectFactTable {
+		t.Fatalf("expected realtime direct fact-table optimization, got %q", plan.QueryEvidence().Optimization)
+	}
+	if plan.QueryEvidence().ScalarFilterCount != 1 {
+		t.Fatalf("expected realtime since predicate evidence, got %d", plan.QueryEvidence().ScalarFilterCount)
+	}
+	if plan.QueryEvidence().UsesPropertyTable {
+		t.Fatal("expected realtime query to avoid the property table")
+	}
+	if plan.QueryEvidence().SortField != storage.EventSortByEventTime || plan.QueryEvidence().SortDirection != storage.EventSortDescending {
+		t.Fatalf("unexpected realtime sort evidence: %#v", plan.QueryEvidence())
 	}
 }
 
@@ -248,6 +281,12 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	if len(plan.Args) != 18 {
 		t.Fatalf("expected tenant/project/source/property/property/limit args, got %d: %#v", len(plan.Args), plan.Args)
 	}
+	if plan.QueryEvidence().PropertyFilterCount != 2 {
+		t.Fatalf("expected 2 property evidence filters, got %d", plan.QueryEvidence().PropertyFilterCount)
+	}
+	if !plan.QueryEvidence().UsesPropertyTable {
+		t.Fatal("expected property-filter query evidence to use property table")
+	}
 }
 
 func TestEventQueryBuilderCombinesScalarVisitSortAndPropertyFilters(t *testing.T) {
@@ -333,6 +372,15 @@ func TestEventQueryBuilderCombinesScalarVisitSortAndPropertyFilters(t *testing.T
 	}
 	if len(plan.Args) != 24 {
 		t.Fatalf("expected combined scalar/property/paging args, got %d: %#v", len(plan.Args), plan.Args)
+	}
+	if plan.QueryEvidence().ScalarFilterCount != 5 {
+		t.Fatalf("expected combined scalar evidence count 5, got %d", plan.QueryEvidence().ScalarFilterCount)
+	}
+	if plan.QueryEvidence().PropertyFilterCount != 2 {
+		t.Fatalf("expected combined property evidence count 2, got %d", plan.QueryEvidence().PropertyFilterCount)
+	}
+	if plan.QueryEvidence().SortField != storage.EventSortByEventName || plan.QueryEvidence().SortDirection != storage.EventSortAscending {
+		t.Fatalf("unexpected sort evidence: %#v", plan.QueryEvidence())
 	}
 }
 

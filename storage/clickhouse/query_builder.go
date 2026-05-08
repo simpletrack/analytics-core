@@ -177,6 +177,12 @@ func NewEventQueryBuilder(router *TableRouter, opts ...EventQueryBuilderOption) 
 
 // BuildEventsQuery builds a paged Events query for one tenant/project/source.
 func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.EventListQuery) (storage.EventQueryPlan, error) {
+	return b.buildEventsQuery(ctx, query, storage.EventQueryFamilyEvents)
+}
+
+// buildEventsQuery builds the shared Events and Realtime query path while
+// keeping the family marker explicit for read-side evidence.
+func (b *EventQueryBuilder) buildEventsQuery(ctx context.Context, query storage.EventListQuery, family storage.EventQueryFamily) (storage.EventQueryPlan, error) {
 	if b == nil {
 		return storage.EventQueryPlan{}, errors.New("event query builder is required")
 	}
@@ -237,7 +243,9 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 		scope = scope.Offset(query.Offset)
 	}
 
-	return buildPlan(scope, table, limit)
+	// Build evidence from the storage-neutral contract rather than the SQL
+	// string so future projection/MV/aggregate paths can update it explicitly.
+	return buildPlan(scope, table, limit, b.buildEvidence(family, query))
 }
 
 // BuildRealtimeQuery builds the Realtime recent-events query.
@@ -248,13 +256,13 @@ func (b *EventQueryBuilder) BuildRealtimeQuery(ctx context.Context, query storag
 
 	// Realtime is the same logical query family as Events, but it defaults to a
 	// smaller limit and uses Since as the minimum event time.
-	return b.BuildEventsQuery(ctx, storage.EventListQuery{
+	return b.buildEventsQuery(ctx, storage.EventListQuery{
 		TenantID:  query.TenantID,
 		ProjectID: query.ProjectID,
 		SourceID:  query.SourceID,
 		From:      query.Since,
 		Limit:     b.normalizeLimit(query.Limit, defaultRealtimeLimit),
-	})
+	}, storage.EventQueryFamilyRealtime)
 }
 
 func (b *EventQueryBuilder) routeQuery(tenantID string, projectID string, sourceID string) (Table, error) {
@@ -377,6 +385,55 @@ func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
 	return limit
 }
 
+// buildEvidence maps the storage-neutral query shape into structured
+// read-side evidence for later projection and aggregation decisions.
+func (b *EventQueryBuilder) buildEvidence(family storage.EventQueryFamily, query storage.EventListQuery) storage.EventQueryEvidence {
+	// Evidence is intentionally built from the storage-neutral query contract
+	// rather than the generated SQL string. Future projection, MV, or aggregate
+	// paths can update this metadata without teaching handlers about ClickHouse.
+	sortField := query.SortField
+	if sortField == "" {
+		sortField = storage.EventSortByEventTime
+	}
+	sortDirection := query.SortDirection
+	if sortDirection == "" {
+		sortDirection = storage.EventSortDescending
+	}
+
+	return storage.EventQueryEvidence{
+		Family:              family,
+		ReadPath:            storage.EventReadPathFactEvents,
+		Optimization:        storage.EventQueryOptimizationDirectFactTable,
+		ScalarFilterCount:   scalarFilterCount(query),
+		PropertyFilterCount: len(query.PropertyFilters),
+		UsesPropertyTable:   len(query.PropertyFilters) > 0,
+		SortField:           sortField,
+		SortDirection:       sortDirection,
+	}
+}
+
+// scalarFilterCount counts the non-property predicates that materially affect
+// the scan shape after routing has already fixed the tenant/project/source.
+func scalarFilterCount(query storage.EventListQuery) int {
+	// Count non-property predicates that materially affect scan shape after the
+	// tenant/project/source route is fixed. Source routing itself is excluded
+	// because every valid query must already provide that boundary.
+	count := len(query.Filters)
+	if query.EventName != "" {
+		count++
+	}
+	if query.DistinctID != "" {
+		count++
+	}
+	if !query.From.IsZero() {
+		count++
+	}
+	if !query.To.IsZero() {
+		count++
+	}
+	return count
+}
+
 func (b *EventQueryBuilder) applyEventsOrder(scope *gorm.DB, field storage.EventSortField, direction storage.EventSortDirection) (*gorm.DB, error) {
 	// Keep sort fields and directions closed over typed constants so UI query
 	// strings cannot become arbitrary SQL identifiers or clauses.
@@ -483,20 +540,21 @@ func (b *EventQueryBuilder) baseScope(ctx context.Context, tableName string) *go
 		Select(eventSelectColumns)
 }
 
-func buildPlan(scope *gorm.DB, table Table, limit int) (storage.EventQueryPlan, error) {
+func buildPlan(scope *gorm.DB, table Table, limit int, evidence storage.EventQueryEvidence) (storage.EventQueryPlan, error) {
 	// Find materializes GORM's statement without executing because the session
 	// is dry-run; this is the single query-building exit for P1 views.
 	stmt := scope.Find(&[]eventRowModel{}).Statement
 	if stmt == nil || stmt.SQL.Len() == 0 {
 		return storage.EventQueryPlan{}, errors.New("gorm did not build an event query")
 	}
-	return storage.EventQueryPlan{
-		SQL:           stmt.SQL.String(),
-		Args:          append([]any(nil), stmt.Vars...),
-		LogicalTable:  table.Logical,
-		PhysicalTable: table.Physical,
-		Limit:         limit,
-	}, nil
+	return storage.NewEventQueryPlan(
+		stmt.SQL.String(),
+		append([]any(nil), stmt.Vars...),
+		table.Logical,
+		table.Physical,
+		limit,
+		evidence,
+	), nil
 }
 
 func newDryRunQueryDB() (*gorm.DB, error) {

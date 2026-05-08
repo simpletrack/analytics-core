@@ -23,10 +23,12 @@ func ExampleEventQueryBuilder_BuildEventsQuery() {
 	fmt.Println(strings.HasPrefix(plan.PhysicalTable, "events_"))
 	fmt.Println(strings.Contains(plan.SQL, "ORDER BY event_time DESC"))
 	fmt.Println(plan.Limit)
+	fmt.Println(plan.QueryEvidence().ReadPath)
 
 	// Output:
 	// events
 	// true
 	// true
 	// 20
+	// fact_events
 }
