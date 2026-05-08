@@ -186,13 +186,21 @@ func NewEventQueryPlan(sql string, args []any, logicalTable, physicalTable strin
 		LogicalTable:  logicalTable,
 		PhysicalTable: physicalTable,
 		Limit:         limit,
-		evidence:      evidence,
+		evidence:      cloneEventQueryEvidence(evidence),
 	}
 }
 
 // QueryEvidence returns the structural read-side metadata associated with the plan.
 func (p EventQueryPlan) QueryEvidence() EventQueryEvidence {
-	return p.evidence
+	return cloneEventQueryEvidence(p.evidence)
+}
+
+// cloneEventQueryEvidence returns evidence with private slice backing arrays.
+func cloneEventQueryEvidence(evidence EventQueryEvidence) EventQueryEvidence {
+	// Clone slice-backed fields at every plan boundary so callers can inspect
+	// read-side evidence without mutating the canonical plan metadata.
+	evidence.PropertyFilters = append([]EventPropertyFilterEvidence(nil), evidence.PropertyFilters...)
+	return evidence
 }
 
 // EventQueryResult returns records together with the read-side evidence used to fetch them.
