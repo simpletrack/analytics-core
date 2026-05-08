@@ -107,10 +107,16 @@ go test ./internal/e2e -run '^$' -bench 'BenchmarkEventReaderClickHouseExecution
 ```
 
 The reader benchmark intentionally separates recent-window Realtime from
-wide-since Realtime. Each Realtime scenario logs and asserts its `since`
-timestamp and eligible row count before timing, so benchmark evidence cannot
-silently treat a wide historical scan as the product's normal short-window
-Realtime path.
+wide-since Realtime, and separates recent-window Events from wide-window
+Events for both scalar and typed-property filters. Each scenario logs and
+asserts its time window and eligible row count before timing, so benchmark
+evidence cannot silently treat a wide historical scan as the product's normal
+short-window Realtime or recent-window Events path.
+
+Events scenarios also preflight the real `EventQueryPlan` before timing. The
+preflight checks `QueryEvidence()` and bound `from/to` arguments so future
+changes cannot accidentally drop ClickHouse time predicates while helper-side
+window arithmetic still appears correct.
 
 Run write-path comparison benchmarks when a proposal changes ClickHouse event
 write strategy:

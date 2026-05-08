@@ -141,9 +141,11 @@ go test ./internal/e2e -run TestEventReaderClickHouseExplain -count=1 -v
 ```
 
 This test records the current ClickHouse read path for recent-window Realtime,
-wide-since Realtime, medium scalar Events, and high property-filtered Events
-query shapes. It does not change the optimization policy by itself; use it
-together with the benchmark policy in
+wide-since Realtime, recent-window Events, wide-window Events, recent-window
+typed-property Events, and wide-window typed-property Events query shapes.
+It also verifies the real `EventQueryPlan` keeps `from/to` time bounds for
+Events before logging ClickHouse `EXPLAIN` output. The explain output does not
+change the optimization policy by itself; use it together with the benchmark policy in
 `docs/read-side-optimization-policy.md`.
 
 Stop local dependencies:
