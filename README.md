@@ -131,6 +131,20 @@ go test ./internal/e2e -run TestCollectToRealtimeAndEventsPipeline -v
 
 The end-to-end test creates routed ClickHouse event and property tables, publishes pageview and custom-event collect requests through Redis Stream, consumes them through `ingestion.Processor`, writes events and typed property rows with MySQL idempotency guards, then reads them back through Events, Realtime, and allowlisted property-filter queries.
 
+Capture read-side explain evidence against local ClickHouse when evaluating
+future projections, materialized views, or aggregate tables:
+
+```powershell
+$env:ANALYTICS_CORE_CLICKHOUSE_BENCH='1'
+$env:ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS='100000'
+go test ./internal/e2e -run TestEventReaderClickHouseExplain -count=1 -v
+```
+
+This test records the current ClickHouse read path for low-, medium-, and
+high-pressure query shapes. It does not change the optimization policy by
+itself; use it together with the benchmark policy in
+`docs/read-side-optimization-policy.md`.
+
 Stop local dependencies:
 
 ```powershell

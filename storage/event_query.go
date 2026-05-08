@@ -35,11 +35,16 @@ const (
 type EventFilterField string
 
 const (
-	EventFilterByEventName  EventFilterField = "event_name"  // EventFilterByEventName filters by the analytics event name.
-	EventFilterByDistinctID EventFilterField = "distinct_id" // EventFilterByDistinctID filters by the visitor or user identity key.
-	EventFilterBySessionID  EventFilterField = "session_id"  // EventFilterBySessionID filters by the optional session key.
-	EventFilterByVisitID    EventFilterField = "visit_id"    // EventFilterByVisitID filters by the canonical analytics visit key.
-	EventFilterBySourceType EventFilterField = "source_type" // EventFilterBySourceType filters by the source category such as web, server, or mobile.
+	// EventFilterByEventName filters by the analytics event name.
+	EventFilterByEventName EventFilterField = "event_name"
+	// EventFilterByDistinctID filters by the visitor or user identity key.
+	EventFilterByDistinctID EventFilterField = "distinct_id"
+	// EventFilterBySessionID filters by the optional session key.
+	EventFilterBySessionID EventFilterField = "session_id"
+	// EventFilterByVisitID filters by the canonical analytics visit key.
+	EventFilterByVisitID EventFilterField = "visit_id"
+	// EventFilterBySourceType filters by the source category such as web, server, or mobile.
+	EventFilterBySourceType EventFilterField = "source_type"
 )
 
 // EventFilterOperator is the allowlisted Events filter operator.

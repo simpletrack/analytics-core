@@ -19,6 +19,11 @@ Every optimization proposal must include all of the following:
   current optimization, effective limit, offset, time-bound flags, bounded
   time window, scalar filter count, property filter count, property table
   usage, sort field, and sort direction.
+- Explain-plan evidence for the same query shape when a physical-structure
+  change is under discussion. The explain output should show whether the
+  current path still reads through the primary routed fact table, whether
+  typed property filters add `CreatingSets`, and whether the read already uses
+  the expected sort or primary-key condition.
 - Representative benchmark data from local or staging ClickHouse with the same
   query family and filter shape.
 - Expected row volume, source count, time window, page size, and sort behavior.
@@ -77,6 +82,20 @@ Run the standard suite before accepting any read-side optimization:
 ```powershell
 go test ./...
 ```
+
+Capture explain-plan evidence when evaluating whether a stable query shape
+needs projection, materialized-view, or aggregate-table work:
+
+```powershell
+$env:ANALYTICS_CORE_CLICKHOUSE_BENCH='1'
+$env:ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS='100000'
+go test ./internal/e2e -run TestEventReaderClickHouseExplain -count=1 -v
+```
+
+Treat the explain output as evidence, not as an optimization trigger by
+itself. A query can show `CreatingSets` or a full-granule property-table path
+and still stay on the direct fact-table route if benchmark cost and product
+pressure remain acceptable.
 
 Run read-side ClickHouse execution benchmarks when local Docker dependencies
 are available:
