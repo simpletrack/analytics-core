@@ -16,6 +16,7 @@ import (
 	"github.com/simpletrack/analytics-core/storage/clickhouse"
 	gormclickhouse "gorm.io/driver/clickhouse"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 const clickHouseBenchmarkEnabledEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH"
@@ -233,7 +234,9 @@ func openBenchmarkClickHouseGORM(ctx context.Context, b *testing.B) *gorm.DB {
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		db, err := gorm.Open(gormclickhouse.Open(dsn), &gorm.Config{})
+		db, err := gorm.Open(gormclickhouse.Open(dsn), &gorm.Config{
+			Logger: logger.Default.LogMode(logger.Silent),
+		})
 		if err != nil {
 			lastErr = err
 		} else if sqlDB, sqlErr := db.DB(); sqlErr != nil {
