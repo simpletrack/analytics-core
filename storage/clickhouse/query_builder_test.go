@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,9 @@ func TestEventQueryBuilderBuildsEventsQuery(t *testing.T) {
 	}
 	if plan.QueryEvidence().UsesPropertyTable {
 		t.Fatal("expected simple events query to avoid the property table")
+	}
+	if len(plan.QueryEvidence().PropertyFilters) != 0 {
+		t.Fatalf("expected no property filter evidence, got %#v", plan.QueryEvidence().PropertyFilters)
 	}
 }
 
@@ -314,6 +318,23 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	if !plan.QueryEvidence().UsesPropertyTable {
 		t.Fatal("expected property-filter query evidence to use property table")
 	}
+	wantPropertyEvidence := []storage.EventPropertyFilterEvidence{
+		{
+			Scope:     storage.PropertyScopeEvent,
+			Name:      "button",
+			ValueType: storage.PropertyValueString,
+			Operator:  storage.EventFilterEquals,
+		},
+		{
+			Scope:     storage.PropertyScopeUser,
+			Name:      "plan",
+			ValueType: storage.PropertyValueString,
+			Operator:  storage.EventFilterNotEquals,
+		},
+	}
+	if !reflect.DeepEqual(plan.QueryEvidence().PropertyFilters, wantPropertyEvidence) {
+		t.Fatalf("unexpected property filter evidence: got %#v want %#v", plan.QueryEvidence().PropertyFilters, wantPropertyEvidence)
+	}
 }
 
 func TestEventQueryBuilderCombinesScalarVisitSortAndPropertyFilters(t *testing.T) {
@@ -417,6 +438,23 @@ func TestEventQueryBuilderCombinesScalarVisitSortAndPropertyFilters(t *testing.T
 	}
 	if plan.QueryEvidence().PropertyFilterCount != 2 {
 		t.Fatalf("expected combined property evidence count 2, got %d", plan.QueryEvidence().PropertyFilterCount)
+	}
+	wantPropertyEvidence := []storage.EventPropertyFilterEvidence{
+		{
+			Scope:     storage.PropertyScopeEvent,
+			Name:      "button",
+			ValueType: storage.PropertyValueString,
+			Operator:  storage.EventFilterEquals,
+		},
+		{
+			Scope:     storage.PropertyScopeUser,
+			Name:      "score",
+			ValueType: storage.PropertyValueNumber,
+			Operator:  storage.EventFilterNotEquals,
+		},
+	}
+	if !reflect.DeepEqual(plan.QueryEvidence().PropertyFilters, wantPropertyEvidence) {
+		t.Fatalf("unexpected combined property filter evidence: got %#v want %#v", plan.QueryEvidence().PropertyFilters, wantPropertyEvidence)
 	}
 	if plan.QueryEvidence().SortField != storage.EventSortByEventName || plan.QueryEvidence().SortDirection != storage.EventSortAscending {
 		t.Fatalf("unexpected sort evidence: %#v", plan.QueryEvidence())

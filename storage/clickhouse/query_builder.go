@@ -416,9 +416,34 @@ func (b *EventQueryBuilder) buildEvidence(family storage.EventQueryFamily, query
 		ScalarFilterCount:   scalarFilterCount(query),
 		PropertyFilterCount: len(query.PropertyFilters),
 		UsesPropertyTable:   len(query.PropertyFilters) > 0,
+		PropertyFilters:     propertyFilterEvidence(query.PropertyFilters),
 		SortField:           sortField,
 		SortDirection:       sortDirection,
 	}
+}
+
+// propertyFilterEvidence records typed property predicate shapes without values.
+func propertyFilterEvidence(filters []storage.EventPropertyFilter) []storage.EventPropertyFilterEvidence {
+	if len(filters) == 0 {
+		return nil
+	}
+
+	evidence := make([]storage.EventPropertyFilterEvidence, 0, len(filters))
+	for _, filter := range filters {
+		// Build evidence from normalized selectors so diagnostics match the
+		// actual property-table predicate shape accepted by the query builder.
+		selector, err := normalizePropertySelector(filter.Scope, filter.Name)
+		if err != nil {
+			selector = storage.PropertySelector{Scope: filter.Scope, Name: filter.Name}
+		}
+		evidence = append(evidence, storage.EventPropertyFilterEvidence{
+			Scope:     selector.Scope,
+			Name:      selector.Name,
+			ValueType: filter.ValueType,
+			Operator:  filter.Operator,
+		})
+	}
+	return evidence
 }
 
 // scalarFilterCount counts the non-property predicates that materially affect

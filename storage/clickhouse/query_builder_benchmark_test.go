@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -137,8 +138,28 @@ func BenchmarkEventQueryBuilderReadSideShapes(b *testing.B) {
 				ScalarFilterCount:   7,
 				PropertyFilterCount: 3,
 				UsesPropertyTable:   true,
-				SortField:           storage.EventSortByReceivedAt,
-				SortDirection:       storage.EventSortDescending,
+				PropertyFilters: []storage.EventPropertyFilterEvidence{
+					{
+						Scope:     storage.PropertyScopeEvent,
+						Name:      "button",
+						ValueType: storage.PropertyValueString,
+						Operator:  storage.EventFilterEquals,
+					},
+					{
+						Scope:     storage.PropertyScopeUser,
+						Name:      "score",
+						ValueType: storage.PropertyValueNumber,
+						Operator:  storage.EventFilterNotEquals,
+					},
+					{
+						Scope:     storage.PropertyScopeEvent,
+						Name:      "is_paid",
+						ValueType: storage.PropertyValueBool,
+						Operator:  storage.EventFilterEquals,
+					},
+				},
+				SortField:     storage.EventSortByReceivedAt,
+				SortDirection: storage.EventSortDescending,
 			},
 		},
 	}
@@ -194,6 +215,7 @@ func assertBenchmarkEvidence(
 		got.ScalarFilterCount != want.ScalarFilterCount ||
 		got.PropertyFilterCount != want.PropertyFilterCount ||
 		got.UsesPropertyTable != want.UsesPropertyTable ||
+		!reflect.DeepEqual(got.PropertyFilters, want.PropertyFilters) ||
 		got.SortField != want.SortField ||
 		got.SortDirection != want.SortDirection {
 		b.Fatalf("unexpected query evidence: got %#v want %#v", got, want)

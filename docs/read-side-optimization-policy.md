@@ -18,7 +18,8 @@ Every optimization proposal must include all of the following:
 - Query evidence from `EventQueryPlan.QueryEvidence()`: family, read path,
   current optimization, effective limit, offset, time-bound flags, bounded
   time window, scalar filter count, property filter count, property table
-  usage, sort field, and sort direction.
+  usage, typed property filter shapes without values, sort field, and sort
+  direction.
 - Explain-plan evidence for the same query shape when a physical-structure
   change is under discussion. The explain output should show whether the
   current path still reads through the primary routed fact table, whether
