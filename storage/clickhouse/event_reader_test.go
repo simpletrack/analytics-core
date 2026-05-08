@@ -128,6 +128,55 @@ func TestEventReaderListRealtimeUsesRealtimePlan(t *testing.T) {
 	}
 }
 
+func TestEventReaderCountEventsUsesCountPlan(t *testing.T) {
+	db, mock, cleanup := newMockClickHouseDB(t)
+	defer cleanup()
+
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+	reader, err := NewEventReader(db, builder)
+	if err != nil {
+		t.Fatalf("new event reader failed: %v", err)
+	}
+
+	query := storage.EventCountQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		EventName: "signup_started",
+		From:      time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC),
+		To:        time.Date(2026, 5, 2, 8, 0, 0, 0, time.UTC),
+	}
+	plan, err := builder.BuildEventCountQuery(context.Background(), query)
+	if err != nil {
+		t.Fatalf("build expected count plan failed: %v", err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(driverArgs(plan.Args)...).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(int64(42)))
+
+	result, err := reader.CountEventsWithEvidence(context.Background(), query)
+	if err != nil {
+		t.Fatalf("count events with evidence failed: %v", err)
+	}
+	if result.Count != 42 {
+		t.Fatalf("expected count 42, got %d", result.Count)
+	}
+	if result.Evidence.Family != storage.EventQueryFamilyGoal {
+		t.Fatalf("expected goal count evidence, got %#v", result.Evidence)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestEventReaderListEventsWithEvidenceReturnsPlanEvidence(t *testing.T) {
 	db, mock, cleanup := newMockClickHouseDB(t)
 	defer cleanup()

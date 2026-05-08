@@ -100,6 +100,59 @@ func TestEventQueryBuilderBuildsEventsQuery(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderBuildsGoalCountQuery(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	from := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+	plan, err := builder.BuildEventCountQuery(context.Background(), storage.EventCountQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		EventName: "signup_started",
+		From:      from,
+		To:        to,
+	})
+	if err != nil {
+		t.Fatalf("build goal count query failed: %v", err)
+	}
+
+	for _, fragment := range []string{
+		"SELECT count() AS count",
+		"FROM `" + plan.PhysicalTable + "`",
+		"tenant_id = ? AND project_id = ? AND source_id = ?",
+		"event_time >= ?",
+		"event_time < ?",
+		"event_name = ?",
+	} {
+		if !strings.Contains(plan.SQL, fragment) {
+			t.Fatalf("expected SQL fragment %q in %q", fragment, plan.SQL)
+		}
+	}
+	if strings.Contains(plan.SQL, "ORDER BY") || strings.Contains(plan.SQL, "LIMIT") {
+		t.Fatalf("goal count query should not order or paginate: %s", plan.SQL)
+	}
+	if plan.QueryEvidence().Family != storage.EventQueryFamilyGoal {
+		t.Fatalf("expected goal evidence family, got %q", plan.QueryEvidence().Family)
+	}
+	if plan.QueryEvidence().EffectiveLimit != 0 || plan.QueryEvidence().Offset != 0 {
+		t.Fatalf("expected aggregate evidence to avoid row limit/offset, got %#v", plan.QueryEvidence())
+	}
+	if !plan.QueryEvidence().HasTimeLowerBound || !plan.QueryEvidence().HasTimeUpperBound {
+		t.Fatalf("expected bounded goal time evidence, got %#v", plan.QueryEvidence())
+	}
+	if plan.QueryEvidence().ScalarFilterCount != 3 {
+		t.Fatalf("expected event name and time bounds evidence, got %d", plan.QueryEvidence().ScalarFilterCount)
+	}
+}
+
 func TestEventQueryBuilderBuildsRealtimeQuery(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {

@@ -111,6 +111,20 @@ type EventListQuery struct {
 	AllowedPropertySelectors []PropertySelector    // AllowedPropertySelectors are source-scoped property filter allowlists
 }
 
+// EventCountQuery describes one bounded event-count query.
+type EventCountQuery struct {
+	TenantID                 string                // TenantID is the tenant boundary key
+	ProjectID                string                // ProjectID is the project or website boundary key
+	SourceID                 string                // SourceID is the source boundary key inside the project
+	EventName                string                // EventName filters to the analytics event being counted
+	DistinctID               string                // DistinctID optionally filters to one visitor or user key
+	From                     time.Time             // From filters events at or after this event time
+	To                       time.Time             // To filters events before this event time
+	Filters                  []EventFilter         // Filters are extra allowlisted field/operator/value predicates
+	PropertyFilters          []EventPropertyFilter // PropertyFilters are extra allowlisted typed property predicates
+	AllowedPropertySelectors []PropertySelector    // AllowedPropertySelectors are source-scoped property filter allowlists
+}
+
 // RealtimeQuery describes the recent-events query used by Realtime.
 type RealtimeQuery struct {
 	TenantID  string    // TenantID is the tenant boundary key
@@ -126,6 +140,8 @@ type EventQueryFamily string
 const (
 	// EventQueryFamilyEvents marks a paged Raw Events query.
 	EventQueryFamilyEvents EventQueryFamily = "events"
+	// EventQueryFamilyGoal marks a bounded Goal event-count query.
+	EventQueryFamilyGoal EventQueryFamily = "goal"
 	// EventQueryFamilyRealtime marks a recent-events Realtime query.
 	EventQueryFamilyRealtime EventQueryFamily = "realtime"
 )
@@ -148,7 +164,7 @@ const (
 
 // EventQueryEvidence explains the read-side shape chosen by a query builder.
 type EventQueryEvidence struct {
-	Family              EventQueryFamily              // Family distinguishes Events from Realtime
+	Family              EventQueryFamily              // Family distinguishes Events, Realtime, and Goal reads
 	ReadPath            EventReadPath                 // ReadPath identifies the logical read model
 	Optimization        EventQueryOptimization        // Optimization identifies the physical acceleration strategy
 	EffectiveLimit      int                           // EffectiveLimit is the builder-capped row limit
@@ -209,6 +225,12 @@ type EventQueryResult struct {
 	Evidence EventQueryEvidence // Evidence explains the read path, guardrails, and optimization used by the query
 }
 
+// EventCountResult returns a count together with the read-side evidence used to fetch it.
+type EventCountResult struct {
+	Count    int64              // Count is the number of matching events in the bounded query window
+	Evidence EventQueryEvidence // Evidence explains the read path, guardrails, and optimization used by the query
+}
+
 // EventRecord is one event row returned by an analytics query.
 type EventRecord struct {
 	ID             string    // ID is the stable event id used for idempotent ingestion
@@ -229,6 +251,8 @@ type EventRecord struct {
 
 // EventQueryBuilder builds storage-specific event query plans.
 type EventQueryBuilder interface {
+	// BuildEventCountQuery builds a bounded event-count query.
+	BuildEventCountQuery(context.Context, EventCountQuery) (EventQueryPlan, error)
 	// BuildEventsQuery builds the paged Events table query.
 	BuildEventsQuery(context.Context, EventListQuery) (EventQueryPlan, error)
 	// BuildRealtimeQuery builds the recent-events Realtime query.
@@ -237,6 +261,8 @@ type EventQueryBuilder interface {
 
 // EventReader executes event queries against the storage backend.
 type EventReader interface {
+	// CountEvents returns the number of matching events for one tenant/project/source.
+	CountEvents(context.Context, EventCountQuery) (int64, error)
 	// ListEvents returns paged Events rows for one tenant/project/source.
 	ListEvents(context.Context, EventListQuery) ([]EventRecord, error)
 	// ListRealtime returns recent Realtime rows for one tenant/project/source.
@@ -249,6 +275,8 @@ type EventReader interface {
 // internal APIs or operators without coupling HTTP handlers to ClickHouse SQL.
 type EventReaderWithEvidence interface {
 	EventReader
+	// CountEventsWithEvidence returns a count and the query evidence used to fetch it.
+	CountEventsWithEvidence(context.Context, EventCountQuery) (EventCountResult, error)
 	// ListEventsWithEvidence returns Events rows and the query evidence used to fetch them.
 	ListEventsWithEvidence(context.Context, EventListQuery) (EventQueryResult, error)
 	// ListRealtimeWithEvidence returns Realtime rows and the query evidence used to fetch them.

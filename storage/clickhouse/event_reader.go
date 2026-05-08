@@ -29,6 +29,37 @@ func NewEventReader(db *gorm.DB, builder *EventQueryBuilder) (*EventReader, erro
 	return &EventReader{db: db, builder: builder}, nil
 }
 
+// CountEvents executes a bounded event-count query.
+func (r *EventReader) CountEvents(ctx context.Context, query storage.EventCountQuery) (int64, error) {
+	result, err := r.CountEventsWithEvidence(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	return result.Count, nil
+}
+
+// CountEventsWithEvidence executes a bounded event-count query and returns read-side evidence.
+func (r *EventReader) CountEventsWithEvidence(ctx context.Context, query storage.EventCountQuery) (storage.EventCountResult, error) {
+	if r == nil {
+		return storage.EventCountResult{}, errors.New("event reader is required")
+	}
+
+	// Goal summaries need exact counts, but they must still pass through the
+	// same routed table and allowlisted predicate builder as Events readback.
+	plan, err := r.builder.BuildEventCountQuery(ctx, query)
+	if err != nil {
+		return storage.EventCountResult{}, err
+	}
+	count, err := r.executeCountPlan(ctx, plan)
+	if err != nil {
+		return storage.EventCountResult{}, err
+	}
+	return storage.EventCountResult{
+		Count:    count,
+		Evidence: plan.QueryEvidence(),
+	}, nil
+}
+
 // ListEvents executes the paged Events query.
 func (r *EventReader) ListEvents(ctx context.Context, query storage.EventListQuery) ([]storage.EventRecord, error) {
 	result, err := r.ListEventsWithEvidence(ctx, query)
@@ -107,6 +138,20 @@ func (r *EventReader) executePlan(ctx context.Context, plan storage.EventQueryPl
 		records = append(records, row.toRecord())
 	}
 	return records, nil
+}
+
+func (r *EventReader) executeCountPlan(ctx context.Context, plan storage.EventQueryPlan) (int64, error) {
+	var rows []eventCountRowModel
+
+	// Raw executes a sealed count plan. The count route is used by Goal P1, so
+	// it intentionally avoids scanning event rows just to compute a total.
+	if err := r.db.WithContext(ctx).Raw(plan.SQL, plan.Args...).Scan(&rows).Error; err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].Count, nil
 }
 
 func (row eventRowModel) toRecord() storage.EventRecord {

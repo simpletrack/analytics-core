@@ -168,6 +168,16 @@ func Normalize(request Request, receivedAt time.Time) (contracts.EventEnvelope, 
 	}, nil
 }
 
+// ValidateEventName validates the canonical analytics event-name contract.
+//
+// ValidateEventName is exported so control-plane callers can reject impossible
+// Goal or filter inputs before they persist rules that the collect path would
+// never accept. Callers should trim surrounding whitespace before calling this
+// function because Normalize owns request normalization for collect payloads.
+func ValidateEventName(value string) error {
+	return validateEventName(value)
+}
+
 func trimRequest(request Request) Request {
 	request.ID = strings.TrimSpace(request.ID)
 	request.TenantID = strings.TrimSpace(request.TenantID)

@@ -175,6 +175,24 @@ func NewEventQueryBuilder(router *TableRouter, opts ...EventQueryBuilderOption) 
 	return builder, nil
 }
 
+// BuildEventCountQuery builds a bounded count query for one tenant/project/source.
+func (b *EventQueryBuilder) BuildEventCountQuery(ctx context.Context, query storage.EventCountQuery) (storage.EventQueryPlan, error) {
+	if b == nil {
+		return storage.EventQueryPlan{}, errors.New("event query builder is required")
+	}
+
+	// Count queries use the same guarded predicate builder as Events. This keeps
+	// Goal-style reads on the direct fact-table policy until benchmark evidence
+	// justifies a projection, materialized view, or aggregate table.
+	listQuery := eventCountQueryAsListQuery(query)
+	scope, table, err := b.buildFilteredEventsScope(ctx, listQuery)
+	if err != nil {
+		return storage.EventQueryPlan{}, err
+	}
+	scope = scope.Select("count() AS count")
+	return buildCountPlan(scope, table, b.buildEvidence(storage.EventQueryFamilyGoal, listQuery, 0))
+}
+
 // BuildEventsQuery builds a paged Events query for one tenant/project/source.
 func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.EventListQuery) (storage.EventQueryPlan, error) {
 	return b.buildEventsQuery(ctx, query, storage.EventQueryFamilyEvents)
@@ -187,53 +205,14 @@ func (b *EventQueryBuilder) buildEventsQuery(ctx context.Context, query storage.
 		return storage.EventQueryPlan{}, errors.New("event query builder is required")
 	}
 
-	// Reject invalid caller windows before table routing so malformed UI/API
-	// input cannot produce a broad or ambiguous ClickHouse scan.
-	if query.Offset < 0 {
-		return storage.EventQueryPlan{}, invalidEventQueryError("offset must be non-negative")
-	}
-	if !query.From.IsZero() && !query.To.IsZero() && !query.From.Before(query.To) {
-		return storage.EventQueryPlan{}, invalidEventQueryError("from must be before to")
-	}
-	if len(query.Filters)+len(query.PropertyFilters) > b.policy.maxFilters {
-		return storage.EventQueryPlan{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters)+len(query.PropertyFilters), b.policy.maxFilters)
-	}
-
-	// Resolve the physical table before touching GORM so dynamic table routing
-	// stays owned by the ClickHouse adapter.
-	table, err := b.routeQuery(query.TenantID, query.ProjectID, query.SourceID)
+	scope, table, err := b.buildFilteredEventsScope(ctx, query)
 	if err != nil {
-		return storage.EventQueryPlan{}, invalidEventQueryError("%v", err)
+		return storage.EventQueryPlan{}, err
 	}
 
 	// Normalize limits at the boundary; handlers should not decide ClickHouse
 	// safety caps or default pagination behavior.
 	limit := b.normalizeLimit(query.Limit, defaultEventsLimit)
-
-	// Compose the query through GORM clauses so filters, ordering, and pagination
-	// share one path for Events, Realtime, and later funnel/retention views.
-	scope := b.baseScope(ctx, table.Physical).
-		Where("tenant_id = ? AND project_id = ? AND source_id = ?", query.TenantID, query.ProjectID, query.SourceID)
-	if !query.From.IsZero() {
-		scope = scope.Where("event_time >= ?", query.From.UTC())
-	}
-	if !query.To.IsZero() {
-		scope = scope.Where("event_time < ?", query.To.UTC())
-	}
-	if query.EventName != "" {
-		scope = scope.Where("event_name = ?", query.EventName)
-	}
-	if query.DistinctID != "" {
-		scope = scope.Where("distinct_id = ?", query.DistinctID)
-	}
-	scope, err = b.applyEventFilters(scope, query.Filters)
-	if err != nil {
-		return storage.EventQueryPlan{}, err
-	}
-	scope, err = b.applyPropertyFilters(scope, table, query)
-	if err != nil {
-		return storage.EventQueryPlan{}, err
-	}
 	scope, err = b.applyEventsOrder(scope, query.SortField, query.SortDirection)
 	if err != nil {
 		return storage.EventQueryPlan{}, err
@@ -246,6 +225,21 @@ func (b *EventQueryBuilder) buildEventsQuery(ctx context.Context, query storage.
 	// Build evidence from the storage-neutral contract rather than the SQL
 	// string so future projection/MV/aggregate paths can update it explicitly.
 	return buildPlan(scope, table, limit, b.buildEvidence(family, query, limit))
+}
+
+func eventCountQueryAsListQuery(query storage.EventCountQuery) storage.EventListQuery {
+	return storage.EventListQuery{
+		TenantID:                 query.TenantID,
+		ProjectID:                query.ProjectID,
+		SourceID:                 query.SourceID,
+		EventName:                query.EventName,
+		DistinctID:               query.DistinctID,
+		From:                     query.From,
+		To:                       query.To,
+		Filters:                  query.Filters,
+		PropertyFilters:          query.PropertyFilters,
+		AllowedPropertySelectors: query.AllowedPropertySelectors,
+	}
 }
 
 // BuildRealtimeQuery builds the Realtime recent-events query.
@@ -263,6 +257,53 @@ func (b *EventQueryBuilder) BuildRealtimeQuery(ctx context.Context, query storag
 		From:      query.Since,
 		Limit:     b.normalizeLimit(query.Limit, defaultRealtimeLimit),
 	}, storage.EventQueryFamilyRealtime)
+}
+
+func (b *EventQueryBuilder) buildFilteredEventsScope(ctx context.Context, query storage.EventListQuery) (*gorm.DB, Table, error) {
+	// Reject invalid caller windows before table routing so malformed UI/API
+	// input cannot produce a broad or ambiguous ClickHouse scan.
+	if query.Offset < 0 {
+		return nil, Table{}, invalidEventQueryError("offset must be non-negative")
+	}
+	if !query.From.IsZero() && !query.To.IsZero() && !query.From.Before(query.To) {
+		return nil, Table{}, invalidEventQueryError("from must be before to")
+	}
+	if len(query.Filters)+len(query.PropertyFilters) > b.policy.maxFilters {
+		return nil, Table{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters)+len(query.PropertyFilters), b.policy.maxFilters)
+	}
+
+	// Resolve the physical table before touching GORM so dynamic table routing
+	// stays owned by the ClickHouse adapter.
+	table, err := b.routeQuery(query.TenantID, query.ProjectID, query.SourceID)
+	if err != nil {
+		return nil, Table{}, invalidEventQueryError("%v", err)
+	}
+
+	// Compose predicates through GORM clauses so Events, Realtime, and Goal
+	// counts share one allowlisted storage path.
+	scope := b.baseScope(ctx, table.Physical).
+		Where("tenant_id = ? AND project_id = ? AND source_id = ?", query.TenantID, query.ProjectID, query.SourceID)
+	if !query.From.IsZero() {
+		scope = scope.Where("event_time >= ?", query.From.UTC())
+	}
+	if !query.To.IsZero() {
+		scope = scope.Where("event_time < ?", query.To.UTC())
+	}
+	if query.EventName != "" {
+		scope = scope.Where("event_name = ?", query.EventName)
+	}
+	if query.DistinctID != "" {
+		scope = scope.Where("distinct_id = ?", query.DistinctID)
+	}
+	scope, err = b.applyEventFilters(scope, query.Filters)
+	if err != nil {
+		return nil, Table{}, err
+	}
+	scope, err = b.applyPropertyFilters(scope, table, query)
+	if err != nil {
+		return nil, Table{}, err
+	}
+	return scope, table, nil
 }
 
 func (b *EventQueryBuilder) routeQuery(tenantID string, projectID string, sourceID string) (Table, error) {
@@ -591,6 +632,23 @@ func buildPlan(scope *gorm.DB, table Table, limit int, evidence storage.EventQue
 	), nil
 }
 
+func buildCountPlan(scope *gorm.DB, table Table, evidence storage.EventQueryEvidence) (storage.EventQueryPlan, error) {
+	// Find materializes the count SELECT in dry-run mode. Count queries return
+	// one aggregate row and intentionally avoid Events ordering or pagination.
+	stmt := scope.Find(&[]eventCountRowModel{}).Statement
+	if stmt == nil || stmt.SQL.Len() == 0 {
+		return storage.EventQueryPlan{}, errors.New("gorm did not build an event count query")
+	}
+	return storage.NewEventQueryPlan(
+		stmt.SQL.String(),
+		append([]any(nil), stmt.Vars...),
+		table.Logical,
+		table.Physical,
+		0,
+		evidence,
+	), nil
+}
+
 func newDryRunQueryDB() (*gorm.DB, error) {
 	// SkipInitializeWithVersion and DisableAutomaticPing let the builder use the
 	// ClickHouse dialect without requiring a local ClickHouse server in tests.
@@ -622,4 +680,8 @@ type eventRowModel struct {
 	Properties     string    `gorm:"column:properties"`      // Properties is the serialized event property payload
 	UserProperties string    `gorm:"column:user_properties"` // UserProperties is the serialized user property payload
 	Source         string    `gorm:"column:source"`          // Source is the optional source label for diagnostics
+}
+
+type eventCountRowModel struct {
+	Count int64 `gorm:"column:count"` // Count is the aggregate number returned by ClickHouse count()
 }

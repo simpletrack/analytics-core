@@ -32,3 +32,24 @@ func ExampleEventQueryBuilder_BuildEventsQuery() {
 	// 20
 	// fact_events
 }
+
+func ExampleEventQueryBuilder_BuildEventCountQuery() {
+	router, _ := NewTableRouter("events")
+	builder, _ := NewEventQueryBuilder(router)
+
+	plan, _ := builder.BuildEventCountQuery(context.Background(), storage.EventCountQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		EventName: "signup_started",
+	})
+
+	fmt.Println(plan.LogicalTable)
+	fmt.Println(strings.Contains(plan.SQL, "count() AS count"))
+	fmt.Println(plan.QueryEvidence().Family)
+
+	// Output:
+	// events
+	// true
+	// goal
+}
