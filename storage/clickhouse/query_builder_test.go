@@ -102,6 +102,21 @@ func TestEventQueryBuilderBuildsRealtimeQuery(t *testing.T) {
 	}
 }
 
+func TestEventQueryBuilderRejectsInvalidReadSidePolicy(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+
+	_, err = NewEventQueryBuilder(router, WithMaxQueryLimit(0))
+	if err == nil {
+		t.Fatal("expected invalid read-side policy error")
+	}
+	if !strings.Contains(err.Error(), "max query limit must be positive") {
+		t.Fatalf("expected max query limit error, got %v", err)
+	}
+}
+
 func TestEventQueryBuilderUsesSortAllowlist(t *testing.T) {
 	router, err := NewTableRouter("events")
 	if err != nil {

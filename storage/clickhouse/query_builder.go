@@ -79,20 +79,20 @@ func WithQueryDB(db *gorm.DB) EventQueryBuilderOption {
 // WithMaxQueryLimit caps Events and Realtime query limits.
 func WithMaxQueryLimit(max int) EventQueryBuilderOption {
 	return func(builder *EventQueryBuilder) {
-		builder.maxLimit = max
+		builder.policy.maxQueryLimit = max
 	}
 }
 
 // WithAllowedPropertyFilters adds property keys that may be used in Events queries.
 func WithAllowedPropertyFilters(selectors ...storage.PropertySelector) EventQueryBuilderOption {
 	return func(builder *EventQueryBuilder) {
-		if builder.allowedProperties == nil {
-			builder.allowedProperties = make(map[storage.PropertySelector]struct{})
+		if builder.policy.allowedProperties == nil {
+			builder.policy.allowedProperties = make(map[storage.PropertySelector]struct{})
 		}
 		for _, selector := range selectors {
 			normalized, err := normalizePropertySelector(selector.Scope, selector.Name)
 			if err == nil {
-				builder.allowedProperties[normalized] = struct{}{}
+				builder.policy.allowedProperties[normalized] = struct{}{}
 			}
 		}
 	}
@@ -105,10 +105,43 @@ func WithAllowedPropertyFilters(selectors ...storage.PropertySelector) EventQuer
 // physical tables, GORM internals, or ClickHouse driver details to analysis
 // modules.
 type EventQueryBuilder struct {
-	router            *TableRouter                          // router resolves tenant/project/source to physical event tables
-	db                *gorm.DB                              // db is the GORM builder used in dry-run mode for SQL and args
-	maxLimit          int                                   // maxLimit prevents unbounded product queries
-	allowedProperties map[storage.PropertySelector]struct{} // allowedProperties is the property filter allowlist
+	router *TableRouter   // router resolves tenant/project/source to physical event tables
+	db     *gorm.DB       // db is the GORM builder used in dry-run mode for SQL and args
+	policy readSidePolicy // policy owns read-side guardrails that must not leak to handlers
+}
+
+// readSidePolicy collects ClickHouse read-side guardrails in one adapter-owned boundary.
+type readSidePolicy struct {
+	maxQueryLimit     int                                   // maxQueryLimit prevents unbounded product queries
+	maxFilters        int                                   // maxFilters caps scalar plus property predicates
+	allowedProperties map[storage.PropertySelector]struct{} // allowedProperties is the static property filter allowlist
+}
+
+// defaultReadSidePolicy returns the P1.5 baseline query governance policy.
+func defaultReadSidePolicy() readSidePolicy {
+	// Keep conservative defaults here instead of in HTTP/service handlers so
+	// every caller of EventQueryBuilder receives the same ClickHouse safeguards.
+	return readSidePolicy{
+		maxQueryLimit:     defaultMaxQueryLimit,
+		maxFilters:        defaultMaxFilters,
+		allowedProperties: make(map[storage.PropertySelector]struct{}),
+	}
+}
+
+// validate checks whether the policy can guard a production query builder.
+func (p readSidePolicy) validate() error {
+	// Validate policy at builder construction time so a misconfigured runtime
+	// cannot silently widen ClickHouse query fan-out or drop property guards.
+	if p.maxQueryLimit <= 0 {
+		return errors.New("max query limit must be positive")
+	}
+	if p.maxFilters <= 0 {
+		return errors.New("max event filters must be positive")
+	}
+	if p.allowedProperties == nil {
+		return errors.New("allowed property filter map is required")
+	}
+	return nil
 }
 
 // NewEventQueryBuilder creates a ClickHouse event query builder.
@@ -124,10 +157,9 @@ func NewEventQueryBuilder(router *TableRouter, opts ...EventQueryBuilderOption) 
 		return nil, err
 	}
 	builder := &EventQueryBuilder{
-		router:            router,
-		db:                db,
-		maxLimit:          defaultMaxQueryLimit,
-		allowedProperties: make(map[storage.PropertySelector]struct{}),
+		router: router,
+		db:     db,
+		policy: defaultReadSidePolicy(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -137,8 +169,8 @@ func NewEventQueryBuilder(router *TableRouter, opts ...EventQueryBuilderOption) 
 	if builder.db == nil {
 		return nil, errors.New("gorm query db is required")
 	}
-	if builder.maxLimit <= 0 {
-		return nil, errors.New("max query limit must be positive")
+	if err := builder.policy.validate(); err != nil {
+		return nil, err
 	}
 	return builder, nil
 }
@@ -157,8 +189,8 @@ func (b *EventQueryBuilder) BuildEventsQuery(ctx context.Context, query storage.
 	if !query.From.IsZero() && !query.To.IsZero() && !query.From.Before(query.To) {
 		return storage.EventQueryPlan{}, invalidEventQueryError("from must be before to")
 	}
-	if len(query.Filters)+len(query.PropertyFilters) > defaultMaxFilters {
-		return storage.EventQueryPlan{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters)+len(query.PropertyFilters), defaultMaxFilters)
+	if len(query.Filters)+len(query.PropertyFilters) > b.policy.maxFilters {
+		return storage.EventQueryPlan{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters)+len(query.PropertyFilters), b.policy.maxFilters)
 	}
 
 	// Resolve the physical table before touching GORM so dynamic table routing
@@ -316,7 +348,7 @@ func (b *EventQueryBuilder) propertySelectorAllowed(query storage.EventListQuery
 	// Builder-level allowlists cover static deployments, while query-level
 	// allowlists let a runtime service carry the current source config through
 	// the storage-neutral query contract.
-	if _, ok := b.allowedProperties[selector]; ok {
+	if _, ok := b.policy.allowedProperties[selector]; ok {
 		return true
 	}
 	// Normalize query-provided selectors with the same rules as filters so
@@ -339,8 +371,8 @@ func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
 	if limit <= 0 {
 		limit = fallback
 	}
-	if limit > b.maxLimit {
-		return b.maxLimit
+	if limit > b.policy.maxQueryLimit {
+		return b.policy.maxQueryLimit
 	}
 	return limit
 }
