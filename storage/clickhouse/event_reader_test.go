@@ -128,6 +128,56 @@ func TestEventReaderListRealtimeUsesRealtimePlan(t *testing.T) {
 	}
 }
 
+func TestEventReaderListEventsWithEvidenceReturnsPlanEvidence(t *testing.T) {
+	db, mock, cleanup := newMockClickHouseDB(t)
+	defer cleanup()
+
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+	reader, err := NewEventReader(db, builder)
+	if err != nil {
+		t.Fatalf("new event reader failed: %v", err)
+	}
+
+	query := storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		Limit:     10,
+	}
+	plan, err := builder.BuildEventsQuery(context.Background(), query)
+	if err != nil {
+		t.Fatalf("build expected plan failed: %v", err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(driverArgs(plan.Args)...).
+		WillReturnRows(newEventRows())
+
+	result, err := reader.ListEventsWithEvidence(context.Background(), query)
+	if err != nil {
+		t.Fatalf("list events with evidence failed: %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("expected no records, got %d", len(result.Records))
+	}
+	if result.Evidence.Family != storage.EventQueryFamilyEvents {
+		t.Fatalf("expected events evidence, got %#v", result.Evidence)
+	}
+	if result.Evidence.Optimization != storage.EventQueryOptimizationDirectFactTable {
+		t.Fatalf("expected direct fact-table evidence, got %#v", result.Evidence)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func newMockClickHouseDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock, func()) {
 	t.Helper()
 

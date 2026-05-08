@@ -172,6 +172,12 @@ func (p EventQueryPlan) QueryEvidence() EventQueryEvidence {
 	return p.evidence
 }
 
+// EventQueryResult returns records together with the read-side evidence used to fetch them.
+type EventQueryResult struct {
+	Records  []EventRecord      // Records are the storage-neutral analytics rows returned by the query
+	Evidence EventQueryEvidence // Evidence explains the read path, guardrails, and optimization used by the query
+}
+
 // EventRecord is one event row returned by an analytics query.
 type EventRecord struct {
 	ID             string    // ID is the stable event id used for idempotent ingestion
@@ -204,4 +210,16 @@ type EventReader interface {
 	ListEvents(context.Context, EventListQuery) ([]EventRecord, error)
 	// ListRealtime returns recent Realtime rows for one tenant/project/source.
 	ListRealtime(context.Context, RealtimeQuery) ([]EventRecord, error)
+}
+
+// EventReaderWithEvidence executes event queries and returns read-side planning evidence.
+//
+// Services can use this optional interface to surface query-plan metadata to
+// internal APIs or operators without coupling HTTP handlers to ClickHouse SQL.
+type EventReaderWithEvidence interface {
+	EventReader
+	// ListEventsWithEvidence returns Events rows and the query evidence used to fetch them.
+	ListEventsWithEvidence(context.Context, EventListQuery) (EventQueryResult, error)
+	// ListRealtimeWithEvidence returns Realtime rows and the query evidence used to fetch them.
+	ListRealtimeWithEvidence(context.Context, RealtimeQuery) (EventQueryResult, error)
 }

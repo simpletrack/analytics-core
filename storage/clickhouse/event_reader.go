@@ -31,32 +31,64 @@ func NewEventReader(db *gorm.DB, builder *EventQueryBuilder) (*EventReader, erro
 
 // ListEvents executes the paged Events query.
 func (r *EventReader) ListEvents(ctx context.Context, query storage.EventListQuery) ([]storage.EventRecord, error) {
+	result, err := r.ListEventsWithEvidence(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return result.Records, nil
+}
+
+// ListEventsWithEvidence executes the paged Events query and returns read-side evidence.
+func (r *EventReader) ListEventsWithEvidence(ctx context.Context, query storage.EventListQuery) (storage.EventQueryResult, error) {
 	if r == nil {
-		return nil, errors.New("event reader is required")
+		return storage.EventQueryResult{}, errors.New("event reader is required")
 	}
 
 	// Build the routed plan first so execution uses the same SQL path tested by
 	// Realtime, Events, and future analysis modules.
 	plan, err := r.builder.BuildEventsQuery(ctx, query)
 	if err != nil {
-		return nil, err
+		return storage.EventQueryResult{}, err
 	}
-	return r.executePlan(ctx, plan)
+	records, err := r.executePlan(ctx, plan)
+	if err != nil {
+		return storage.EventQueryResult{}, err
+	}
+	return storage.EventQueryResult{
+		Records:  records,
+		Evidence: plan.QueryEvidence(),
+	}, nil
 }
 
 // ListRealtime executes the recent-events Realtime query.
 func (r *EventReader) ListRealtime(ctx context.Context, query storage.RealtimeQuery) ([]storage.EventRecord, error) {
+	result, err := r.ListRealtimeWithEvidence(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return result.Records, nil
+}
+
+// ListRealtimeWithEvidence executes the recent-events Realtime query and returns read-side evidence.
+func (r *EventReader) ListRealtimeWithEvidence(ctx context.Context, query storage.RealtimeQuery) (storage.EventQueryResult, error) {
 	if r == nil {
-		return nil, errors.New("event reader is required")
+		return storage.EventQueryResult{}, errors.New("event reader is required")
 	}
 
 	// Realtime reuses the same execution method as Events, which keeps result
 	// scanning and error handling identical across P1 query views.
 	plan, err := r.builder.BuildRealtimeQuery(ctx, query)
 	if err != nil {
-		return nil, err
+		return storage.EventQueryResult{}, err
 	}
-	return r.executePlan(ctx, plan)
+	records, err := r.executePlan(ctx, plan)
+	if err != nil {
+		return storage.EventQueryResult{}, err
+	}
+	return storage.EventQueryResult{
+		Records:  records,
+		Evidence: plan.QueryEvidence(),
+	}, nil
 }
 
 func (r *EventReader) executePlan(ctx context.Context, plan storage.EventQueryPlan) ([]storage.EventRecord, error) {
