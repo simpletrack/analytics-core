@@ -134,6 +134,11 @@ type EventQueryEvidence struct {
 	Family              EventQueryFamily       // Family distinguishes Events from Realtime
 	ReadPath            EventReadPath          // ReadPath identifies the logical read model
 	Optimization        EventQueryOptimization // Optimization identifies the physical acceleration strategy
+	EffectiveLimit      int                    // EffectiveLimit is the builder-capped row limit
+	Offset              int                    // Offset is the Events pagination offset after validation
+	HasTimeLowerBound   bool                   // HasTimeLowerBound reports whether the query constrains the start time
+	HasTimeUpperBound   bool                   // HasTimeUpperBound reports whether the query constrains the end time
+	TimeWindowSeconds   int64                  // TimeWindowSeconds is the bounded from/to window when both edges are present
 	ScalarFilterCount   int                    // ScalarFilterCount counts non-property predicates after source routing
 	PropertyFilterCount int                    // PropertyFilterCount counts typed property predicates
 	UsesPropertyTable   bool                   // UsesPropertyTable reports whether the typed property table participates

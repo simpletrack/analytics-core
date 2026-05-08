@@ -76,6 +76,18 @@ func TestEventQueryBuilderBuildsEventsQuery(t *testing.T) {
 	if plan.QueryEvidence().Optimization != storage.EventQueryOptimizationDirectFactTable {
 		t.Fatalf("expected direct fact-table optimization, got %q", plan.QueryEvidence().Optimization)
 	}
+	if plan.QueryEvidence().EffectiveLimit != 25 {
+		t.Fatalf("expected effective limit evidence 25, got %d", plan.QueryEvidence().EffectiveLimit)
+	}
+	if plan.QueryEvidence().Offset != 10 {
+		t.Fatalf("expected offset evidence 10, got %d", plan.QueryEvidence().Offset)
+	}
+	if !plan.QueryEvidence().HasTimeLowerBound || !plan.QueryEvidence().HasTimeUpperBound {
+		t.Fatalf("expected both time bounds to be present, got %#v", plan.QueryEvidence())
+	}
+	if plan.QueryEvidence().TimeWindowSeconds != int64(time.Hour/time.Second) {
+		t.Fatalf("expected one-hour time window evidence, got %d", plan.QueryEvidence().TimeWindowSeconds)
+	}
 	if plan.QueryEvidence().ScalarFilterCount != 4 {
 		t.Fatalf("expected 4 scalar evidence filters, got %d", plan.QueryEvidence().ScalarFilterCount)
 	}
@@ -123,6 +135,21 @@ func TestEventQueryBuilderBuildsRealtimeQuery(t *testing.T) {
 	}
 	if plan.QueryEvidence().Optimization != storage.EventQueryOptimizationDirectFactTable {
 		t.Fatalf("expected realtime direct fact-table optimization, got %q", plan.QueryEvidence().Optimization)
+	}
+	if plan.QueryEvidence().EffectiveLimit != 75 {
+		t.Fatalf("expected capped realtime limit evidence 75, got %d", plan.QueryEvidence().EffectiveLimit)
+	}
+	if plan.QueryEvidence().Offset != 0 {
+		t.Fatalf("expected realtime offset evidence 0, got %d", plan.QueryEvidence().Offset)
+	}
+	if !plan.QueryEvidence().HasTimeLowerBound {
+		t.Fatal("expected realtime lower time bound evidence")
+	}
+	if plan.QueryEvidence().HasTimeUpperBound {
+		t.Fatal("expected realtime query to omit upper time bound evidence")
+	}
+	if plan.QueryEvidence().TimeWindowSeconds != 0 {
+		t.Fatalf("expected realtime time window evidence 0, got %d", plan.QueryEvidence().TimeWindowSeconds)
 	}
 	if plan.QueryEvidence().ScalarFilterCount != 1 {
 		t.Fatalf("expected realtime since predicate evidence, got %d", plan.QueryEvidence().ScalarFilterCount)
@@ -372,6 +399,18 @@ func TestEventQueryBuilderCombinesScalarVisitSortAndPropertyFilters(t *testing.T
 	}
 	if len(plan.Args) != 24 {
 		t.Fatalf("expected combined scalar/property/paging args, got %d: %#v", len(plan.Args), plan.Args)
+	}
+	if plan.QueryEvidence().EffectiveLimit != 51 {
+		t.Fatalf("expected effective limit evidence 51, got %d", plan.QueryEvidence().EffectiveLimit)
+	}
+	if plan.QueryEvidence().Offset != 25 {
+		t.Fatalf("expected offset evidence 25, got %d", plan.QueryEvidence().Offset)
+	}
+	if !plan.QueryEvidence().HasTimeLowerBound || !plan.QueryEvidence().HasTimeUpperBound {
+		t.Fatalf("expected both time bounds to be present, got %#v", plan.QueryEvidence())
+	}
+	if plan.QueryEvidence().TimeWindowSeconds != 6*3600 {
+		t.Fatalf("expected six-hour time window evidence, got %d", plan.QueryEvidence().TimeWindowSeconds)
 	}
 	if plan.QueryEvidence().ScalarFilterCount != 5 {
 		t.Fatalf("expected combined scalar evidence count 5, got %d", plan.QueryEvidence().ScalarFilterCount)

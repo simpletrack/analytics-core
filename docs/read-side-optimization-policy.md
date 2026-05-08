@@ -16,8 +16,9 @@ Every optimization proposal must include all of the following:
 - Product capability: Realtime, Events, Dashboard, Goal, Breakdown, Funnel,
   Journey, Retention, or another named feature.
 - Query evidence from `EventQueryPlan.QueryEvidence()`: family, read path,
-  current optimization, scalar filter count, property filter count, property
-  table usage, sort field, and sort direction.
+  current optimization, effective limit, offset, time-bound flags, bounded
+  time window, scalar filter count, property filter count, property table
+  usage, sort field, and sort direction.
 - Representative benchmark data from local or staging ClickHouse with the same
   query family and filter shape.
 - Expected row volume, source count, time window, page size, and sort behavior.

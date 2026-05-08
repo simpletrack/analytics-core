@@ -87,6 +87,11 @@ func BenchmarkEventQueryBuilderReadSideShapes(b *testing.B) {
 				Family:              storage.EventQueryFamilyRealtime,
 				ReadPath:            storage.EventReadPathFactEvents,
 				Optimization:        storage.EventQueryOptimizationDirectFactTable,
+				EffectiveLimit:      50,
+				Offset:              0,
+				HasTimeLowerBound:   true,
+				HasTimeUpperBound:   false,
+				TimeWindowSeconds:   0,
 				ScalarFilterCount:   1,
 				PropertyFilterCount: 0,
 				UsesPropertyTable:   false,
@@ -103,6 +108,11 @@ func BenchmarkEventQueryBuilderReadSideShapes(b *testing.B) {
 				Family:              storage.EventQueryFamilyEvents,
 				ReadPath:            storage.EventReadPathFactEvents,
 				Optimization:        storage.EventQueryOptimizationDirectFactTable,
+				EffectiveLimit:      25,
+				Offset:              0,
+				HasTimeLowerBound:   true,
+				HasTimeUpperBound:   true,
+				TimeWindowSeconds:   3600,
 				ScalarFilterCount:   4,
 				PropertyFilterCount: 0,
 				UsesPropertyTable:   false,
@@ -119,6 +129,11 @@ func BenchmarkEventQueryBuilderReadSideShapes(b *testing.B) {
 				Family:              storage.EventQueryFamilyEvents,
 				ReadPath:            storage.EventReadPathFactEvents,
 				Optimization:        storage.EventQueryOptimizationDirectFactTable,
+				EffectiveLimit:      100,
+				Offset:              0,
+				HasTimeLowerBound:   true,
+				HasTimeUpperBound:   true,
+				TimeWindowSeconds:   3600,
 				ScalarFilterCount:   7,
 				PropertyFilterCount: 3,
 				UsesPropertyTable:   true,
@@ -171,6 +186,11 @@ func assertBenchmarkEvidence(
 	if got.Family != want.Family ||
 		got.ReadPath != want.ReadPath ||
 		got.Optimization != want.Optimization ||
+		got.EffectiveLimit != want.EffectiveLimit ||
+		got.Offset != want.Offset ||
+		got.HasTimeLowerBound != want.HasTimeLowerBound ||
+		got.HasTimeUpperBound != want.HasTimeUpperBound ||
+		got.TimeWindowSeconds != want.TimeWindowSeconds ||
 		got.ScalarFilterCount != want.ScalarFilterCount ||
 		got.PropertyFilterCount != want.PropertyFilterCount ||
 		got.UsesPropertyTable != want.UsesPropertyTable ||

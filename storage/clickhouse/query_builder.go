@@ -245,7 +245,7 @@ func (b *EventQueryBuilder) buildEventsQuery(ctx context.Context, query storage.
 
 	// Build evidence from the storage-neutral contract rather than the SQL
 	// string so future projection/MV/aggregate paths can update it explicitly.
-	return buildPlan(scope, table, limit, b.buildEvidence(family, query))
+	return buildPlan(scope, table, limit, b.buildEvidence(family, query, limit))
 }
 
 // BuildRealtimeQuery builds the Realtime recent-events query.
@@ -387,7 +387,7 @@ func (b *EventQueryBuilder) normalizeLimit(limit int, fallback int) int {
 
 // buildEvidence maps the storage-neutral query shape into structured
 // read-side evidence for later projection and aggregation decisions.
-func (b *EventQueryBuilder) buildEvidence(family storage.EventQueryFamily, query storage.EventListQuery) storage.EventQueryEvidence {
+func (b *EventQueryBuilder) buildEvidence(family storage.EventQueryFamily, query storage.EventListQuery, effectiveLimit int) storage.EventQueryEvidence {
 	// Evidence is intentionally built from the storage-neutral query contract
 	// rather than the generated SQL string. Future projection, MV, or aggregate
 	// paths can update this metadata without teaching handlers about ClickHouse.
@@ -399,11 +399,20 @@ func (b *EventQueryBuilder) buildEvidence(family storage.EventQueryFamily, query
 	if sortDirection == "" {
 		sortDirection = storage.EventSortDescending
 	}
+	timeWindowSeconds := int64(0)
+	if !query.From.IsZero() && !query.To.IsZero() && query.To.After(query.From) {
+		timeWindowSeconds = int64(query.To.Sub(query.From) / time.Second)
+	}
 
 	return storage.EventQueryEvidence{
 		Family:              family,
 		ReadPath:            storage.EventReadPathFactEvents,
 		Optimization:        storage.EventQueryOptimizationDirectFactTable,
+		EffectiveLimit:      effectiveLimit,
+		Offset:              query.Offset,
+		HasTimeLowerBound:   !query.From.IsZero(),
+		HasTimeUpperBound:   !query.To.IsZero(),
+		TimeWindowSeconds:   timeWindowSeconds,
 		ScalarFilterCount:   scalarFilterCount(query),
 		PropertyFilterCount: len(query.PropertyFilters),
 		UsesPropertyTable:   len(query.PropertyFilters) > 0,
