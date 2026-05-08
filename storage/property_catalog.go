@@ -28,10 +28,31 @@ type PropertyCatalogResult struct {
 	Entries int // Entries is the number of unique dictionary entries accepted
 }
 
-// PropertyCatalog stores observed property definitions for governance and UI allowlists.
-type PropertyCatalog interface {
+// PropertyCatalogQuery selects one source-scoped property catalog slice.
+type PropertyCatalogQuery struct {
+	TenantID  string        // TenantID is the tenant boundary key
+	ProjectID string        // ProjectID is the project or website boundary key
+	SourceID  string        // SourceID is the source boundary key inside the project
+	Scope     PropertyScope // Scope optionally narrows the catalog to event or user properties
+	Limit     int           // Limit optionally caps returned rows; zero means no explicit cap
+}
+
+// PropertyCatalogWriter stores observed property definitions for governance and UI allowlists.
+type PropertyCatalogWriter interface {
 	// UpsertPropertyCatalogEntries records observed property selectors and types.
 	UpsertPropertyCatalogEntries(context.Context, []PropertyCatalogEntry) (PropertyCatalogResult, error)
+}
+
+// PropertyCatalogReader reads observed property definitions for source-scoped UI allowlists.
+type PropertyCatalogReader interface {
+	// ListPropertyCatalogEntries returns observed selectors for one tenant/project/source boundary.
+	ListPropertyCatalogEntries(context.Context, PropertyCatalogQuery) ([]PropertyCatalogEntry, error)
+}
+
+// PropertyCatalog combines property catalog reads and writes.
+type PropertyCatalog interface {
+	PropertyCatalogWriter
+	PropertyCatalogReader
 }
 
 // BuildPropertyCatalogEntries condenses typed property rows into dictionary entries.
@@ -161,6 +182,38 @@ func validatePropertyCatalogRecord(record EventPropertyRecord) error {
 	return nil
 }
 
+// ValidatePropertyCatalogEntry rejects incomplete or unsupported catalog metadata.
+func ValidatePropertyCatalogEntry(entry PropertyCatalogEntry) error {
+	// Keep catalog entries strict before they become UI filter suggestions.
+	// Returning unsupported enum values would widen the public readback contract
+	// beyond event/user scopes and null/string/number/bool value types.
+	if entry.TenantID == "" {
+		return errors.New("tenant_id is required")
+	}
+	if entry.ProjectID == "" {
+		return errors.New("project_id is required")
+	}
+	if entry.SourceID == "" {
+		return errors.New("source_id is required")
+	}
+	if err := validatePropertyScope(entry.Scope); err != nil {
+		return err
+	}
+	if entry.Name == "" {
+		return errors.New("property name is required")
+	}
+	if err := validatePropertyValueType(entry.ValueType); err != nil {
+		return err
+	}
+	if entry.FirstSeenAt.IsZero() {
+		return errors.New("first_seen_at is required")
+	}
+	if entry.LastSeenAt.IsZero() {
+		return errors.New("last_seen_at is required")
+	}
+	return nil
+}
+
 // propertyCatalogObservedAt chooses the analytics timestamp used by the catalog.
 func propertyCatalogObservedAt(record EventPropertyRecord) time.Time {
 	// EventTime is the analytics time users reason about. ReceivedAt is only a
@@ -174,6 +227,30 @@ func propertyCatalogObservedAt(record EventPropertyRecord) time.Time {
 	return time.Time{}
 }
 
+// validatePropertyScope rejects scopes outside the stable catalog/query contract.
+func validatePropertyScope(scope PropertyScope) error {
+	switch scope {
+	case "":
+		return errors.New("property scope is required")
+	case PropertyScopeEvent, PropertyScopeUser:
+		return nil
+	default:
+		return errors.New("property scope must be event or user")
+	}
+}
+
+// validatePropertyValueType rejects value types outside the scalar property contract.
+func validatePropertyValueType(valueType PropertyValueType) error {
+	switch valueType {
+	case "":
+		return errors.New("property value type is required")
+	case PropertyValueNull, PropertyValueString, PropertyValueNumber, PropertyValueBool:
+		return nil
+	default:
+		return errors.New("property value type must be null, string, number, or bool")
+	}
+}
+
 // propertyCatalogKeyFromEntry returns the dictionary key for one catalog entry.
 func propertyCatalogKeyFromEntry(entry PropertyCatalogEntry) propertyCatalogKey {
 	return propertyCatalogKey{
@@ -184,4 +261,28 @@ func propertyCatalogKeyFromEntry(entry PropertyCatalogEntry) propertyCatalogKey 
 		Name:      entry.Name,
 		ValueType: entry.ValueType,
 	}
+}
+
+// ValidatePropertyCatalogQuery rejects incomplete source-scoped catalog reads.
+func ValidatePropertyCatalogQuery(query PropertyCatalogQuery) error {
+	// Reads must stay source-scoped so governance and future filter builders do
+	// not accidentally merge unrelated tenant or project metadata.
+	if query.TenantID == "" {
+		return errors.New("tenant_id is required")
+	}
+	if query.ProjectID == "" {
+		return errors.New("project_id is required")
+	}
+	if query.SourceID == "" {
+		return errors.New("source_id is required")
+	}
+	if query.Scope != "" {
+		if err := validatePropertyScope(query.Scope); err != nil {
+			return err
+		}
+	}
+	if query.Limit < 0 {
+		return errors.New("limit must be greater than or equal to 0")
+	}
+	return nil
 }

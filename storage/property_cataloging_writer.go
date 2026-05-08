@@ -15,12 +15,12 @@ import (
 // allowlist workflows. It does not write ClickHouse property rows; combine it
 // with PropertyIndexingEventWriter when physical property indexing is enabled.
 type PropertyCatalogingEventWriter struct {
-	events  EventWriter     // events writes the primary analytics event and any inner decorators
-	catalog PropertyCatalog // catalog records observed property selectors and value types
+	events  EventWriter           // events writes the primary analytics event and any inner decorators
+	catalog PropertyCatalogWriter // catalog records observed property selectors and value types
 }
 
 // NewPropertyCatalogingEventWriter creates an EventWriter that also updates a property catalog.
-func NewPropertyCatalogingEventWriter(events EventWriter, catalog PropertyCatalog) (*PropertyCatalogingEventWriter, error) {
+func NewPropertyCatalogingEventWriter(events EventWriter, catalog PropertyCatalogWriter) (*PropertyCatalogingEventWriter, error) {
 	// Validate dependencies before workers subscribe so configuration errors do
 	// not turn into repeated queue nacks.
 	if events == nil {

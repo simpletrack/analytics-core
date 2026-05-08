@@ -51,6 +51,57 @@ func TestPropertyCatalogSkipsEmptyBatch(t *testing.T) {
 	assertSQLExpectations(t, mock)
 }
 
+func TestPropertyCatalogListsSourceScopedEntries(t *testing.T) {
+	catalog, mock, closeDB := newTestPropertyCatalog(t)
+	defer closeDB()
+
+	seenAt := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows([]string{
+		"tenant_id",
+		"project_id",
+		"source_id",
+		"property_scope",
+		"property_name",
+		"property_type",
+		"first_seen_at",
+		"last_seen_at",
+		"created_at",
+		"updated_at",
+	}).AddRow(
+		"tenant_1",
+		"project_1",
+		"source_1",
+		"event",
+		"button",
+		"string",
+		seenAt,
+		seenAt.Add(time.Hour),
+		seenAt,
+		seenAt.Add(time.Hour),
+	)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `property_catalog`")).
+		WithArgs("tenant_1", "project_1", "source_1", "event", 20).
+		WillReturnRows(rows)
+
+	entries, err := catalog.ListPropertyCatalogEntries(context.Background(), storage.PropertyCatalogQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		Scope:     storage.PropertyScopeEvent,
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("list property catalog entries failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1: %#v", len(entries), entries)
+	}
+	if entries[0].Scope != storage.PropertyScopeEvent || entries[0].Name != "button" || entries[0].ValueType != storage.PropertyValueString {
+		t.Fatalf("entry mismatch: %#v", entries[0])
+	}
+	assertSQLExpectations(t, mock)
+}
+
 func TestPropertyCatalogValidatesEntries(t *testing.T) {
 	catalog, _, closeDB := newTestPropertyCatalog(t)
 	defer closeDB()
@@ -61,6 +112,65 @@ func TestPropertyCatalogValidatesEntries(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "last_seen_at is required") {
 		t.Fatalf("error = %v, want last_seen_at validation", err)
 	}
+}
+
+func TestPropertyCatalogValidatesListQuery(t *testing.T) {
+	catalog, _, closeDB := newTestPropertyCatalog(t)
+	defer closeDB()
+
+	_, err := catalog.ListPropertyCatalogEntries(context.Background(), storage.PropertyCatalogQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		Scope:     storage.PropertyScope("account"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "property scope must be event or user") {
+		t.Fatalf("error = %v, want invalid scope validation", err)
+	}
+}
+
+func TestPropertyCatalogRejectsInvalidStoredEntryEnums(t *testing.T) {
+	catalog, mock, closeDB := newTestPropertyCatalog(t)
+	defer closeDB()
+
+	seenAt := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows([]string{
+		"tenant_id",
+		"project_id",
+		"source_id",
+		"property_scope",
+		"property_name",
+		"property_type",
+		"first_seen_at",
+		"last_seen_at",
+		"created_at",
+		"updated_at",
+	}).AddRow(
+		"tenant_1",
+		"project_1",
+		"source_1",
+		"account",
+		"button",
+		"json",
+		seenAt,
+		seenAt,
+		seenAt,
+		seenAt,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `property_catalog`")).
+		WithArgs("tenant_1", "project_1", "source_1", 20).
+		WillReturnRows(rows)
+
+	_, err := catalog.ListPropertyCatalogEntries(context.Background(), storage.PropertyCatalogQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		Limit:     20,
+	})
+	if err == nil || !strings.Contains(err.Error(), "property scope must be event or user") {
+		t.Fatalf("error = %v, want invalid stored scope validation", err)
+	}
+	assertSQLExpectations(t, mock)
 }
 
 // newTestPropertyCatalog returns a GORM catalog backed by sqlmock.
