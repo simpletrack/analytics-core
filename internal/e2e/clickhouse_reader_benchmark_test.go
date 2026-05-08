@@ -21,6 +21,7 @@ import (
 
 const clickHouseBenchmarkEnabledEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH"
 const clickHouseBenchmarkRowsEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS"
+const benchmarkRecentEventsWindowRows = 5000 // benchmarkRecentEventsWindowRows keeps Events recent-window scenarios at 50 matching rows.
 
 // BenchmarkEventReaderClickHouseExecution measures EventReader latency against
 // a real local ClickHouse instance and a seeded routed event table.
@@ -28,7 +29,8 @@ const clickHouseBenchmarkRowsEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS"
 // The benchmark is opt-in because it depends on docker-compose ClickHouse. It
 // complements the builder-only benchmark by measuring actual GORM Raw execution
 // and ClickHouse read latency for recent-window Realtime, wide-since Realtime,
-// medium scalar Events, and high property-filtered Events query shapes.
+// recent-window Events, wide-window Events, and high property-filtered Events
+// query shapes.
 func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	if os.Getenv(clickHouseBenchmarkEnabledEnv) != "1" {
 		b.Skipf("set %s=1 to run real ClickHouse EventReader benchmark", clickHouseBenchmarkEnabledEnv)
@@ -79,25 +81,26 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	baseTime := benchmarkBaseTime()
 	recentRealtimeSince := benchmarkRecentRealtimeSince(rowCount)
 	wideRealtimeSince := baseTime.Add(-time.Minute)
+	recentEventsFrom := benchmarkRecentEventsFrom(rowCount)
+	wideEventsFrom := benchmarkWideEventsFrom()
+	eventsTo := benchmarkEndTime(rowCount)
 	scenarios := []struct {
-		name                 string
-		realtimeSince        time.Time
-		realtimeEligibleRows int
-		read                 func(context.Context) ([]storage.EventRecord, error)
-		check                func(*testing.B, []storage.EventRecord)
+		name                 string                                                // name identifies the benchmark subcase and expected query pressure.
+		realtimeSince        time.Time                                             // realtimeSince marks the Realtime lower bound; zero means this is not a Realtime scenario.
+		realtimeEligibleRows int                                                   // realtimeEligibleRows records the expected rows ClickHouse can scan for Realtime.
+		eventFrom            time.Time                                             // eventFrom marks the Events lower bound; zero means this is not an Events scenario.
+		eventTo              time.Time                                             // eventTo marks the Events upper bound used by EventReader.
+		eventWindowRows      int                                                   // eventWindowRows records the expected seeded rows inside the Events window.
+		plan                 func(context.Context) (storage.EventQueryPlan, error) // plan builds the sealed SQL shape for optional preflight checks.
+		read                 func(context.Context) ([]storage.EventRecord, error)  // read executes the exact EventReader path being timed.
+		check                func(*testing.B, []storage.EventRecord)               // check verifies result semantics before and during timing.
 	}{
 		{
 			name:                 "low_realtime_recent_window",
 			realtimeSince:        recentRealtimeSince,
 			realtimeEligibleRows: 300,
 			read: func(ctx context.Context) ([]storage.EventRecord, error) {
-				return reader.ListRealtime(ctx, storage.RealtimeQuery{
-					TenantID:  key.TenantID,
-					ProjectID: key.ProjectID,
-					SourceID:  key.SourceID,
-					Since:     recentRealtimeSince,
-					Limit:     50,
-				})
+				return reader.ListRealtime(ctx, benchmarkRealtimeQuery(key, recentRealtimeSince))
 			},
 			check: func(b *testing.B, records []storage.EventRecord) {
 				assertBenchmarkRealtimeRows(b, records, key, rowCount, recentRealtimeSince, 300)
@@ -108,61 +111,67 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 			realtimeSince:        wideRealtimeSince,
 			realtimeEligibleRows: rowCount,
 			read: func(ctx context.Context) ([]storage.EventRecord, error) {
-				return reader.ListRealtime(ctx, storage.RealtimeQuery{
-					TenantID:  key.TenantID,
-					ProjectID: key.ProjectID,
-					SourceID:  key.SourceID,
-					Since:     wideRealtimeSince,
-					Limit:     50,
-				})
+				return reader.ListRealtime(ctx, benchmarkRealtimeQuery(key, wideRealtimeSince))
 			},
 			check: func(b *testing.B, records []storage.EventRecord) {
 				assertBenchmarkRealtimeRows(b, records, key, rowCount, wideRealtimeSince, rowCount)
 			},
 		},
 		{
-			name: "medium_events_scalar",
+			name:            "medium_events_scalar_recent_window",
+			eventFrom:       recentEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: benchmarkRecentEventsWindowRows,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, recentEventsFrom, eventsTo))
+			},
 			read: func(ctx context.Context) ([]storage.EventRecord, error) {
-				return reader.ListEvents(ctx, storage.EventListQuery{
-					TenantID:   key.TenantID,
-					ProjectID:  key.ProjectID,
-					SourceID:   key.SourceID,
-					EventName:  "page_view",
-					DistinctID: "visitor_2",
-					From:       baseTime.Add(-time.Minute),
-					To:         baseTime.Add(time.Duration(rowCount+1) * time.Second),
-					Limit:      50,
-				})
+				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, recentEventsFrom, eventsTo))
 			},
 			check: func(b *testing.B, records []storage.EventRecord) {
 				assertBenchmarkScalarRows(b, records, key)
 			},
 		},
 		{
-			name: "high_events_property",
+			name:            "medium_events_scalar_wide_window",
+			eventFrom:       wideEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: rowCount,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+			},
 			read: func(ctx context.Context) ([]storage.EventRecord, error) {
-				return reader.ListEvents(ctx, storage.EventListQuery{
-					TenantID:      key.TenantID,
-					ProjectID:     key.ProjectID,
-					SourceID:      key.SourceID,
-					EventName:     "signup_clicked",
-					DistinctID:    "visitor_1",
-					From:          baseTime.Add(-time.Minute),
-					To:            baseTime.Add(time.Duration(rowCount+1) * time.Second),
-					SortField:     storage.EventSortByReceivedAt,
-					SortDirection: storage.EventSortDescending,
-					Limit:         50,
-					Filters: []storage.EventFilter{
-						{Field: storage.EventFilterBySessionID, Operator: storage.EventFilterEquals, Value: "session_1"},
-						{Field: storage.EventFilterByVisitID, Operator: storage.EventFilterEquals, Value: "visit_1"},
-						{Field: storage.EventFilterBySourceType, Operator: storage.EventFilterNotEquals, Value: "server"},
-					},
-					PropertyFilters: []storage.EventPropertyFilter{
-						{Scope: storage.PropertyScopeEvent, Name: "button", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "hero"},
-						{Scope: storage.PropertyScopeEvent, Name: "plan", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "pro"},
-						{Scope: storage.PropertyScopeUser, Name: "tier", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "team"},
-					},
-				})
+				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+			},
+			check: func(b *testing.B, records []storage.EventRecord) {
+				assertBenchmarkScalarRows(b, records, key)
+			},
+		},
+		{
+			name:            "high_events_property_recent_window",
+			eventFrom:       recentEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: benchmarkRecentEventsWindowRows,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkPropertyEventsQuery(key, recentEventsFrom, eventsTo))
+			},
+			read: func(ctx context.Context) ([]storage.EventRecord, error) {
+				return reader.ListEvents(ctx, benchmarkPropertyEventsQuery(key, recentEventsFrom, eventsTo))
+			},
+			check: func(b *testing.B, records []storage.EventRecord) {
+				assertBenchmarkPropertyRows(b, records, key)
+			},
+		},
+		{
+			name:            "high_events_property_wide_window",
+			eventFrom:       wideEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: rowCount,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkPropertyEventsQuery(key, wideEventsFrom, eventsTo))
+			},
+			read: func(ctx context.Context) ([]storage.EventRecord, error) {
+				return reader.ListEvents(ctx, benchmarkPropertyEventsQuery(key, wideEventsFrom, eventsTo))
 			},
 			check: func(b *testing.B, records []storage.EventRecord) {
 				assertBenchmarkPropertyRows(b, records, key)
@@ -177,6 +186,17 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 			if !scenario.realtimeSince.IsZero() {
 				assertBenchmarkRealtimeEvidence(b, rowCount, scenario.realtimeSince, scenario.realtimeEligibleRows)
 				b.Logf("realtime window evidence: since=%s eligible_rows=%d row_count=%d", scenario.realtimeSince.Format(time.RFC3339), scenario.realtimeEligibleRows, rowCount)
+			}
+			if !scenario.eventFrom.IsZero() {
+				assertBenchmarkEventWindowEvidence(b, rowCount, scenario.eventFrom, scenario.eventTo, scenario.eventWindowRows)
+				b.Logf("events window evidence: from=%s to=%s eligible_rows=%d row_count=%d", scenario.eventFrom.Format(time.RFC3339), scenario.eventTo.Format(time.RFC3339), scenario.eventWindowRows, rowCount)
+			}
+			if scenario.plan != nil {
+				plan, err := scenario.plan(context.Background())
+				if err != nil {
+					b.Fatalf("preflight query plan failed: %v", err)
+				}
+				assertBenchmarkEventPlanEvidence(b, plan, scenario.eventFrom, scenario.eventTo)
 			}
 
 			records, err := scenario.read(context.Background())
@@ -242,24 +262,24 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 	baseTime := benchmarkBaseTime()
 	recentRealtimeSince := benchmarkRecentRealtimeSince(rowCount)
 	wideRealtimeSince := baseTime.Add(-time.Minute)
+	recentEventsFrom := benchmarkRecentEventsFrom(rowCount)
+	wideEventsFrom := benchmarkWideEventsFrom()
+	eventsTo := benchmarkEndTime(rowCount)
 	scenarios := []struct {
-		name                 string
-		realtimeSince        time.Time
-		realtimeEligibleRows int
-		plan                 func(context.Context) (storage.EventQueryPlan, error)
+		name                 string                                                // name identifies the explain subcase and expected query pressure.
+		realtimeSince        time.Time                                             // realtimeSince marks the Realtime lower bound; zero means this is not a Realtime scenario.
+		realtimeEligibleRows int                                                   // realtimeEligibleRows records the expected rows ClickHouse can scan for Realtime.
+		eventFrom            time.Time                                             // eventFrom marks the Events lower bound; zero means this is not an Events scenario.
+		eventTo              time.Time                                             // eventTo marks the Events upper bound used by EventReader.
+		eventWindowRows      int                                                   // eventWindowRows records the expected seeded rows inside the Events window.
+		plan                 func(context.Context) (storage.EventQueryPlan, error) // plan builds the sealed EventQueryPlan passed to ClickHouse EXPLAIN.
 	}{
 		{
 			name:                 "low_realtime_recent_window",
 			realtimeSince:        recentRealtimeSince,
 			realtimeEligibleRows: 300,
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildRealtimeQuery(ctx, storage.RealtimeQuery{
-					TenantID:  key.TenantID,
-					ProjectID: key.ProjectID,
-					SourceID:  key.SourceID,
-					Since:     recentRealtimeSince,
-					Limit:     50,
-				})
+				return builder.BuildRealtimeQuery(ctx, benchmarkRealtimeQuery(key, recentRealtimeSince))
 			},
 		},
 		{
@@ -267,55 +287,43 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 			realtimeSince:        wideRealtimeSince,
 			realtimeEligibleRows: rowCount,
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildRealtimeQuery(ctx, storage.RealtimeQuery{
-					TenantID:  key.TenantID,
-					ProjectID: key.ProjectID,
-					SourceID:  key.SourceID,
-					Since:     wideRealtimeSince,
-					Limit:     50,
-				})
+				return builder.BuildRealtimeQuery(ctx, benchmarkRealtimeQuery(key, wideRealtimeSince))
 			},
 		},
 		{
-			name: "medium_events_scalar",
+			name:            "medium_events_scalar_recent_window",
+			eventFrom:       recentEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: benchmarkRecentEventsWindowRows,
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildEventsQuery(ctx, storage.EventListQuery{
-					TenantID:   key.TenantID,
-					ProjectID:  key.ProjectID,
-					SourceID:   key.SourceID,
-					EventName:  "page_view",
-					DistinctID: "visitor_2",
-					From:       baseTime.Add(-time.Minute),
-					To:         baseTime.Add(time.Duration(rowCount+1) * time.Second),
-					Limit:      50,
-				})
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, recentEventsFrom, eventsTo))
 			},
 		},
 		{
-			name: "high_events_property",
+			name:            "medium_events_scalar_wide_window",
+			eventFrom:       wideEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: rowCount,
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildEventsQuery(ctx, storage.EventListQuery{
-					TenantID:      key.TenantID,
-					ProjectID:     key.ProjectID,
-					SourceID:      key.SourceID,
-					EventName:     "signup_clicked",
-					DistinctID:    "visitor_1",
-					From:          baseTime.Add(-time.Minute),
-					To:            baseTime.Add(time.Duration(rowCount+1) * time.Second),
-					SortField:     storage.EventSortByReceivedAt,
-					SortDirection: storage.EventSortDescending,
-					Limit:         50,
-					Filters: []storage.EventFilter{
-						{Field: storage.EventFilterBySessionID, Operator: storage.EventFilterEquals, Value: "session_1"},
-						{Field: storage.EventFilterByVisitID, Operator: storage.EventFilterEquals, Value: "visit_1"},
-						{Field: storage.EventFilterBySourceType, Operator: storage.EventFilterNotEquals, Value: "server"},
-					},
-					PropertyFilters: []storage.EventPropertyFilter{
-						{Scope: storage.PropertyScopeEvent, Name: "button", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "hero"},
-						{Scope: storage.PropertyScopeEvent, Name: "plan", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "pro"},
-						{Scope: storage.PropertyScopeUser, Name: "tier", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "team"},
-					},
-				})
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+			},
+		},
+		{
+			name:            "high_events_property_recent_window",
+			eventFrom:       recentEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: benchmarkRecentEventsWindowRows,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkPropertyEventsQuery(key, recentEventsFrom, eventsTo))
+			},
+		},
+		{
+			name:            "high_events_property_wide_window",
+			eventFrom:       wideEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: rowCount,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkPropertyEventsQuery(key, wideEventsFrom, eventsTo))
 			},
 		},
 	}
@@ -329,10 +337,17 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 				assertBenchmarkRealtimeEvidence(t, rowCount, scenario.realtimeSince, scenario.realtimeEligibleRows)
 				t.Logf("realtime window evidence: since=%s eligible_rows=%d row_count=%d", scenario.realtimeSince.Format(time.RFC3339), scenario.realtimeEligibleRows, rowCount)
 			}
+			if !scenario.eventFrom.IsZero() {
+				assertBenchmarkEventWindowEvidence(t, rowCount, scenario.eventFrom, scenario.eventTo, scenario.eventWindowRows)
+				t.Logf("events window evidence: from=%s to=%s eligible_rows=%d row_count=%d", scenario.eventFrom.Format(time.RFC3339), scenario.eventTo.Format(time.RFC3339), scenario.eventWindowRows, rowCount)
+			}
 
 			plan, err := scenario.plan(ctx)
 			if err != nil {
 				t.Fatalf("build query plan failed: %v", err)
+			}
+			if !scenario.eventFrom.IsZero() {
+				assertBenchmarkEventPlanEvidence(t, plan, scenario.eventFrom, scenario.eventTo)
 			}
 			t.Logf("query evidence: %+v", plan.QueryEvidence())
 			for _, line := range explainPlan(ctx, t, clickConn, plan) {
@@ -342,6 +357,7 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 	}
 }
 
+// benchmarkRowCount returns the local fixture size used for opt-in ClickHouse runs.
 func benchmarkRowCount() int {
 	// Keep the default dataset local-friendly while allowing larger manual
 	// pressure runs without changing source code.
@@ -350,7 +366,7 @@ func benchmarkRowCount() int {
 		return 10000
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 1000 {
+	if err != nil || parsed <= benchmarkRecentEventsWindowRows {
 		return 10000
 	}
 	return parsed
@@ -369,6 +385,25 @@ func benchmarkRecentRealtimeSince(rowCount int) time.Time {
 	return benchmarkBaseTime().Add(time.Duration(rowCount-300) * time.Second)
 }
 
+// benchmarkRecentEventsFrom returns a bounded Events window anchor.
+func benchmarkRecentEventsFrom(rowCount int) time.Time {
+	// Events needs a wider recent window than Realtime because the scalar and
+	// typed property fixtures only match every 100 seeded rows. Keeping exactly
+	// 5000 recent rows gives each Events scenario 50 matching records while still
+	// staying distinct from wide-window pressure runs.
+	return benchmarkBaseTime().Add(time.Duration(rowCount-benchmarkRecentEventsWindowRows) * time.Second)
+}
+
+// benchmarkWideEventsFrom returns the lower bound used for wide Events scans.
+func benchmarkWideEventsFrom() time.Time {
+	return benchmarkBaseTime().Add(-time.Minute)
+}
+
+// benchmarkEndTime returns an exclusive upper bound after the newest fixture row.
+func benchmarkEndTime(rowCount int) time.Time {
+	return benchmarkBaseTime().Add(time.Duration(rowCount+1) * time.Second)
+}
+
 // benchmarkEligibleRows returns how many seeded events satisfy since.
 func benchmarkEligibleRows(rowCount int, since time.Time) int {
 	baseTime := benchmarkBaseTime()
@@ -380,6 +415,86 @@ func benchmarkEligibleRows(rowCount int, since time.Time) int {
 		return 0
 	}
 	return rowCount - elapsed
+}
+
+// benchmarkWindowRows returns how many seeded events satisfy a bounded Events window.
+func benchmarkWindowRows(rowCount int, from time.Time, to time.Time) int {
+	baseTime := benchmarkBaseTime()
+	start := 0
+	if from.After(baseTime) {
+		start = int(from.Sub(baseTime) / time.Second)
+	}
+	end := rowCount
+	latest := benchmarkEndTime(rowCount)
+	if to.Before(latest) {
+		end = int(to.Sub(baseTime) / time.Second)
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end > rowCount {
+		end = rowCount
+	}
+	if end < start {
+		return 0
+	}
+	return end - start
+}
+
+// benchmarkRealtimeQuery returns one Realtime query shape for reader benchmarks.
+func benchmarkRealtimeQuery(key clickhouse.RoutingKey, since time.Time) storage.RealtimeQuery {
+	return storage.RealtimeQuery{
+		TenantID:  key.TenantID,
+		ProjectID: key.ProjectID,
+		SourceID:  key.SourceID,
+		Since:     since,
+		Limit:     50,
+	}
+}
+
+// benchmarkScalarEventsQuery returns the medium-pressure scalar Events shape.
+func benchmarkScalarEventsQuery(key clickhouse.RoutingKey, from time.Time, to time.Time) storage.EventListQuery {
+	return storage.EventListQuery{
+		TenantID:   key.TenantID,
+		ProjectID:  key.ProjectID,
+		SourceID:   key.SourceID,
+		EventName:  "page_view",
+		DistinctID: "visitor_2",
+		From:       from,
+		To:         to,
+		Limit:      50,
+	}
+}
+
+// benchmarkPropertyEventsQuery returns the high-pressure typed-property Events shape.
+func benchmarkPropertyEventsQuery(key clickhouse.RoutingKey, from time.Time, to time.Time) storage.EventListQuery {
+	return storage.EventListQuery{
+		TenantID:      key.TenantID,
+		ProjectID:     key.ProjectID,
+		SourceID:      key.SourceID,
+		EventName:     "signup_clicked",
+		DistinctID:    "visitor_1",
+		From:          from,
+		To:            to,
+		SortField:     storage.EventSortByReceivedAt,
+		SortDirection: storage.EventSortDescending,
+		Limit:         50,
+		Filters: []storage.EventFilter{
+			{Field: storage.EventFilterBySessionID, Operator: storage.EventFilterEquals, Value: "session_1"},
+			{Field: storage.EventFilterByVisitID, Operator: storage.EventFilterEquals, Value: "visit_1"},
+			{Field: storage.EventFilterBySourceType, Operator: storage.EventFilterNotEquals, Value: "server"},
+		},
+		PropertyFilters: benchmarkPropertyFilters(),
+	}
+}
+
+// benchmarkPropertyFilters returns the shared high-pressure typed property shape.
+func benchmarkPropertyFilters() []storage.EventPropertyFilter {
+	return []storage.EventPropertyFilter{
+		{Scope: storage.PropertyScopeEvent, Name: "button", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "hero"},
+		{Scope: storage.PropertyScopeEvent, Name: "plan", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "pro"},
+		{Scope: storage.PropertyScopeUser, Name: "tier", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "team"},
+	}
 }
 
 // openBenchmarkClickHouseNative waits for the native ClickHouse write path.
@@ -715,6 +830,60 @@ func assertBenchmarkRealtimeEvidence(tb testing.TB, rowCount int, since time.Tim
 	if expectedEligibleRows < 50 {
 		tb.Fatalf("realtime scenario has only %d eligible rows, want at least 50", expectedEligibleRows)
 	}
+}
+
+// assertBenchmarkEventWindowEvidence verifies Events scenario selectivity.
+func assertBenchmarkEventWindowEvidence(tb testing.TB, rowCount int, from time.Time, to time.Time, expectedWindowRows int) {
+	tb.Helper()
+
+	// Events benchmark rows are split into recent and wide windows so later
+	// optimization decisions can distinguish normal product filtering from broad
+	// pressure scans. The assertion fails before timing or EXPLAIN if those
+	// windows collapse into the same shape.
+	actualWindowRows := benchmarkWindowRows(rowCount, from, to)
+	if actualWindowRows != expectedWindowRows {
+		tb.Fatalf("events window rows = %d, want %d for from %s to %s", actualWindowRows, expectedWindowRows, from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	if expectedWindowRows < benchmarkRecentEventsWindowRows {
+		tb.Fatalf("events scenario has only %d eligible rows, want at least %d", expectedWindowRows, benchmarkRecentEventsWindowRows)
+	}
+}
+
+// assertBenchmarkEventPlanEvidence verifies Events scenarios keep real time predicates.
+func assertBenchmarkEventPlanEvidence(tb testing.TB, plan storage.EventQueryPlan, from time.Time, to time.Time) {
+	tb.Helper()
+
+	// Check both the storage-neutral evidence and the bound SQL arguments. The
+	// evidence keeps optimization decisions observable, while the argument check
+	// catches future drift where From/To remain present in the request but stop
+	// crossing into the actual ClickHouse plan.
+	evidence := plan.QueryEvidence()
+	if evidence.Family != storage.EventQueryFamilyEvents {
+		tb.Fatalf("events plan family = %q, want %q; evidence: %#v", evidence.Family, storage.EventQueryFamilyEvents, evidence)
+	}
+	if !evidence.HasTimeLowerBound || !evidence.HasTimeUpperBound {
+		tb.Fatalf("events plan missing time bounds; evidence: %#v", evidence)
+	}
+	wantWindow := int64(to.UTC().Sub(from.UTC()) / time.Second)
+	if evidence.TimeWindowSeconds != wantWindow {
+		tb.Fatalf("events plan time window = %d, want %d; evidence: %#v", evidence.TimeWindowSeconds, wantWindow, evidence)
+	}
+	if !containsTimeArg(plan.Args, from.UTC()) || !containsTimeArg(plan.Args, to.UTC()) {
+		tb.Fatalf("events plan args do not contain from/to bounds; from=%s to=%s args=%#v", from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339), plan.Args)
+	}
+}
+
+// containsTimeArg reports whether args include the exact UTC time predicate.
+func containsTimeArg(args []any, want time.Time) bool {
+	for _, arg := range args {
+		// GORM preserves time.Time arguments for the ClickHouse driver. Matching
+		// on UTC equality keeps this helper independent of local timezone state.
+		value, ok := arg.(time.Time)
+		if ok && value.UTC().Equal(want.UTC()) {
+			return true
+		}
+	}
+	return false
 }
 
 // assertBenchmarkScalarRows verifies the medium-pressure scalar filter shape.
