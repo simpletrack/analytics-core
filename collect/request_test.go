@@ -78,6 +78,45 @@ func TestNormalizeRejectsUnsupportedEventName(t *testing.T) {
 	}
 }
 
+func TestValidateEventNameContractSamples(t *testing.T) {
+	accepted := []string{
+		"pageview",
+		"page.view",
+		"checkout.completed",
+		"button:click",
+		"signup-started",
+		"event_123",
+		"1st_step",
+		"PageView",
+		strings.Repeat("a", maxEventNameLength),
+	}
+
+	for _, value := range accepted {
+		if err := ValidateEventName(value); err != nil {
+			t.Fatalf("expected %q to satisfy the canonical event-name contract: %v", value, err)
+		}
+	}
+
+	rejected := []string{
+		"",
+		"_pageview",
+		".pageview",
+		":pageview",
+		"-pageview",
+		"checkout completed",
+		"/pageview",
+		"$pageview",
+		"event#name",
+		strings.Repeat("a", maxEventNameLength+1),
+	}
+
+	for _, value := range rejected {
+		if err := ValidateEventName(value); err == nil {
+			t.Fatalf("expected %q to fail the canonical event-name contract", value)
+		}
+	}
+}
+
 func TestNormalizeRejectsFutureEventTime(t *testing.T) {
 	receivedAt := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
 	request := validRequest()
