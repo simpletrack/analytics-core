@@ -322,11 +322,15 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new event query builder failed: %v", err)
 	}
+	from := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	to := from.Add(time.Hour)
 
 	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
 		TenantID:  "tenant_1",
 		ProjectID: "project_1",
 		SourceID:  "source_1",
+		From:      from,
+		To:        to,
 		PropertyFilters: []storage.EventPropertyFilter{
 			{
 				Scope:       storage.PropertyScopeEvent,
@@ -351,6 +355,8 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	propertyTable := plan.PhysicalTable + propertyTableSuffix
 	for _, fragment := range []string{
 		"FROM `" + plan.PhysicalTable + "`",
+		"event_time >= ?",
+		"event_time < ?",
 		"(tenant_id, project_id, source_id, event_id) IN (SELECT tenant_id, project_id, source_id, event_id FROM `" + propertyTable + "`",
 		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value = ?",
 		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value != ?",
@@ -362,7 +368,7 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	if strings.Contains(plan.SQL, "hero") || strings.Contains(plan.SQL, "free") {
 		t.Fatalf("property values should be bound args, not SQL literals: %s", plan.SQL)
 	}
-	if len(plan.Args) != 18 {
+	if len(plan.Args) != 20 {
 		t.Fatalf("expected tenant/project/source/property/property/limit args, got %d: %#v", len(plan.Args), plan.Args)
 	}
 	if plan.QueryEvidence().PropertyFilterCount != 2 {
@@ -523,11 +529,15 @@ func TestEventQueryBuilderUsesQueryScopedPropertyAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new event query builder failed: %v", err)
 	}
+	from := time.Date(2026, 5, 2, 8, 0, 0, 0, time.UTC)
+	to := from.Add(2 * time.Hour)
 
 	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
 		TenantID:  "tenant_1",
 		ProjectID: "project_1",
 		SourceID:  "source_1",
+		From:      from,
+		To:        to,
 		AllowedPropertySelectors: []storage.PropertySelector{
 			{Scope: storage.PropertyScopeEvent, Name: "button"},
 		},
@@ -546,6 +556,44 @@ func TestEventQueryBuilderUsesQueryScopedPropertyAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(plan.SQL, "property_scope = ? AND property_name = ? AND property_type = ? AND string_value = ?") {
 		t.Fatalf("expected property predicate in %q", plan.SQL)
+	}
+}
+
+func TestEventQueryBuilderAllowsPropertyFiltersAtWindowBoundary(t *testing.T) {
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router, WithAllowedPropertyFilters(
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
+	))
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+
+	from := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+	to := from.Add(defaultMaxPropertyFilterWindow)
+	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		From:      from,
+		To:        to,
+		PropertyFilters: []storage.EventPropertyFilter{
+			{
+				Scope:       storage.PropertyScopeEvent,
+				Name:        "button",
+				ValueType:   storage.PropertyValueString,
+				Operator:    storage.EventFilterEquals,
+				StringValue: "hero",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build events query at property window boundary failed: %v", err)
+	}
+	if plan.QueryEvidence().TimeWindowSeconds != int64(defaultMaxPropertyFilterWindow/time.Second) {
+		t.Fatalf("expected boundary window evidence %d, got %d", int64(defaultMaxPropertyFilterWindow/time.Second), plan.QueryEvidence().TimeWindowSeconds)
 	}
 }
 
@@ -610,10 +658,14 @@ func TestEventQueryBuilderRejectsInvalidPropertyFilters(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			from := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
+			to := from.Add(time.Hour)
 			_, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
 				TenantID:        "tenant_1",
 				ProjectID:       "project_1",
 				SourceID:        "source_1",
+				From:            from,
+				To:              to,
 				PropertyFilters: []storage.EventPropertyFilter{tc.filter},
 			})
 			if err == nil {
@@ -750,6 +802,82 @@ func TestEventQueryBuilderRejectsInvalidQueries(t *testing.T) {
 				Filters:   make([]storage.EventFilter, defaultMaxFilters+1),
 			},
 			want: "too many event filters",
+		},
+		{
+			name: "property filters require bounded window",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				PropertyFilters: []storage.EventPropertyFilter{
+					{
+						Scope:       storage.PropertyScopeEvent,
+						Name:        "button",
+						ValueType:   storage.PropertyValueString,
+						Operator:    storage.EventFilterEquals,
+						StringValue: "hero",
+					},
+				},
+			},
+			want: "property filters require bounded from and to",
+		},
+		{
+			name: "property filters reject missing to bound",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				From:      now,
+				PropertyFilters: []storage.EventPropertyFilter{
+					{
+						Scope:       storage.PropertyScopeEvent,
+						Name:        "button",
+						ValueType:   storage.PropertyValueString,
+						Operator:    storage.EventFilterEquals,
+						StringValue: "hero",
+					},
+				},
+			},
+			want: "property filters require bounded from and to",
+		},
+		{
+			name: "property filters reject missing from bound",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				To:        now.Add(time.Hour),
+				PropertyFilters: []storage.EventPropertyFilter{
+					{
+						Scope:       storage.PropertyScopeEvent,
+						Name:        "button",
+						ValueType:   storage.PropertyValueString,
+						Operator:    storage.EventFilterEquals,
+						StringValue: "hero",
+					},
+				},
+			},
+			want: "property filters require bounded from and to",
+		},
+		{
+			name: "property filters reject wide window",
+			query: storage.EventListQuery{
+				TenantID:  "tenant_1",
+				ProjectID: "project_1",
+				SourceID:  "source_1",
+				From:      now,
+				To:        now.Add(8 * 24 * time.Hour),
+				PropertyFilters: []storage.EventPropertyFilter{
+					{
+						Scope:       storage.PropertyScopeEvent,
+						Name:        "button",
+						ValueType:   storage.PropertyValueString,
+						Operator:    storage.EventFilterEquals,
+						StringValue: "hero",
+					},
+				},
+			},
+			want: "property-filter time window 192h0m0s exceeds max 168h0m0s",
 		},
 	}
 

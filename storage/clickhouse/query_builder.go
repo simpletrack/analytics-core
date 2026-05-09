@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	defaultEventsLimit   = 100
-	defaultRealtimeLimit = 50
-	defaultMaxQueryLimit = 1000
-	defaultMaxFilters    = 20
+	defaultEventsLimit             = 100
+	defaultRealtimeLimit           = 50
+	defaultMaxQueryLimit           = 1000
+	defaultMaxFilters              = 20
+	defaultMaxPropertyFilterWindow = 7 * 24 * time.Hour
 )
 
 var eventSelectColumns = []string{
@@ -112,9 +113,10 @@ type EventQueryBuilder struct {
 
 // readSidePolicy collects ClickHouse read-side guardrails in one adapter-owned boundary.
 type readSidePolicy struct {
-	maxQueryLimit     int                                   // maxQueryLimit prevents unbounded product queries
-	maxFilters        int                                   // maxFilters caps scalar plus property predicates
-	allowedProperties map[storage.PropertySelector]struct{} // allowedProperties is the static property filter allowlist
+	maxQueryLimit           int                                   // maxQueryLimit prevents unbounded product queries
+	maxFilters              int                                   // maxFilters caps scalar plus property predicates
+	maxPropertyFilterWindow time.Duration                         // maxPropertyFilterWindow limits wide typed-property scans before physical tuning exists
+	allowedProperties       map[storage.PropertySelector]struct{} // allowedProperties is the static property filter allowlist
 }
 
 // defaultReadSidePolicy returns the P1.5 baseline query governance policy.
@@ -122,9 +124,10 @@ func defaultReadSidePolicy() readSidePolicy {
 	// Keep conservative defaults here instead of in HTTP/service handlers so
 	// every caller of EventQueryBuilder receives the same ClickHouse safeguards.
 	return readSidePolicy{
-		maxQueryLimit:     defaultMaxQueryLimit,
-		maxFilters:        defaultMaxFilters,
-		allowedProperties: make(map[storage.PropertySelector]struct{}),
+		maxQueryLimit:           defaultMaxQueryLimit,
+		maxFilters:              defaultMaxFilters,
+		maxPropertyFilterWindow: defaultMaxPropertyFilterWindow,
+		allowedProperties:       make(map[storage.PropertySelector]struct{}),
 	}
 }
 
@@ -137,6 +140,9 @@ func (p readSidePolicy) validate() error {
 	}
 	if p.maxFilters <= 0 {
 		return errors.New("max event filters must be positive")
+	}
+	if p.maxPropertyFilterWindow <= 0 {
+		return errors.New("max property-filter time window must be positive")
 	}
 	if p.allowedProperties == nil {
 		return errors.New("allowed property filter map is required")
@@ -271,6 +277,9 @@ func (b *EventQueryBuilder) buildFilteredEventsScope(ctx context.Context, query 
 	if len(query.Filters)+len(query.PropertyFilters) > b.policy.maxFilters {
 		return nil, Table{}, invalidEventQueryError("too many event filters: %d > %d", len(query.Filters)+len(query.PropertyFilters), b.policy.maxFilters)
 	}
+	if err := b.validatePropertyFilterWindow(query); err != nil {
+		return nil, Table{}, err
+	}
 
 	// Resolve the physical table before touching GORM so dynamic table routing
 	// stays owned by the ClickHouse adapter.
@@ -304,6 +313,28 @@ func (b *EventQueryBuilder) buildFilteredEventsScope(ctx context.Context, query 
 		return nil, Table{}, err
 	}
 	return scope, table, nil
+}
+
+func (b *EventQueryBuilder) validatePropertyFilterWindow(query storage.EventListQuery) error {
+	// Typed property predicates are the current highest-pressure direct fact-table
+	// shape. Require explicit bounded windows here so future callers cannot turn
+	// property exploration into an unbounded historical scan before a stronger
+	// read-side optimization has real evidence behind it.
+	if len(query.PropertyFilters) == 0 {
+		return nil
+	}
+	if query.From.IsZero() || query.To.IsZero() {
+		return invalidEventQueryError("property filters require bounded from and to")
+	}
+	window := query.To.Sub(query.From)
+	if window > b.policy.maxPropertyFilterWindow {
+		return invalidEventQueryError(
+			"property-filter time window %s exceeds max %s",
+			window.Truncate(time.Second),
+			b.policy.maxPropertyFilterWindow.Truncate(time.Second),
+		)
+	}
+	return nil
 }
 
 func (b *EventQueryBuilder) routeQuery(tenantID string, projectID string, sourceID string) (Table, error) {

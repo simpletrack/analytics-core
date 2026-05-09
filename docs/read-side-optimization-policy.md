@@ -36,6 +36,19 @@ Every optimization proposal must include all of the following:
 Without this evidence, the correct decision is to stay on the direct fact-table
 path and improve property governance or query-plan limits first.
 
+## Current Query-Plan Guardrails
+
+- Product handlers and services must keep using `storage.EventQueryBuilder` and
+  `storage.EventReader`; they must not bypass the builder with ad-hoc
+  ClickHouse SQL.
+- Typed property filters are only allowed when the query includes explicit
+  `from` and `to` bounds.
+- Typed property filters currently stay on a direct-query window of seven days
+  or less. Broader historical property exploration must first come back with
+  fresh query evidence, explain output, and a physical-structure proposal.
+- Filter count, sort fields, sort direction, and property selectors remain
+  allowlisted at the query-builder boundary.
+
 ## Decision Matrix
 
 | Optimization | Use When | Do Not Use When |
