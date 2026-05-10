@@ -21,8 +21,30 @@ import (
 
 const clickHouseBenchmarkEnabledEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH"
 const clickHouseBenchmarkRowsEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS"
-const benchmarkRecentEventsWindowRows = 5000             // benchmarkRecentEventsWindowRows keeps Events recent-window scenarios at 50 matching rows.
-const benchmarkBoundedDayEventsWindowRows = 24 * 60 * 60 // benchmarkBoundedDayEventsWindowRows tracks one bounded 24h Events history slice.
+const benchmarkRecentEventsWindowRows = 5000 // benchmarkRecentEventsWindowRows keeps Events recent-window scenarios at 50 matching rows.
+
+// benchmarkBoundedScalarWindowSpec describes one bounded scalar Events window
+// that should only enter the suite when it stays distinct from the wide-window
+// fixture at the current row volume.
+type benchmarkBoundedScalarWindowSpec struct {
+	name       string // name identifies the benchmark and explain subcase.
+	windowRows int    // windowRows maps the bounded time slice to seeded one-second event rows.
+}
+
+var benchmarkBoundedScalarWindowSpecs = []benchmarkBoundedScalarWindowSpec{
+	{
+		name:       "medium_events_scalar_bounded_24h_window",
+		windowRows: 24 * 60 * 60,
+	},
+	{
+		name:       "medium_events_scalar_bounded_72h_window",
+		windowRows: 72 * 60 * 60,
+	},
+	{
+		name:       "medium_events_scalar_bounded_7d_window",
+		windowRows: 7 * 24 * 60 * 60,
+	},
+}
 
 // benchmarkReadScenario captures one timed EventReader benchmark case.
 type benchmarkReadScenario struct {
@@ -54,7 +76,7 @@ type benchmarkExplainScenario struct {
 // The benchmark is opt-in because it depends on docker-compose ClickHouse. It
 // complements the builder-only benchmark by measuring actual GORM Raw execution
 // and ClickHouse read latency for recent-window Realtime, wide-since Realtime,
-// recent-window Events, bounded 24h scalar Events, wide-window Events, and
+// recent-window Events, bounded scalar Events windows, wide-window Events, and
 // high property-filtered Events query shapes.
 func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	if os.Getenv(clickHouseBenchmarkEnabledEnv) != "1" {
@@ -148,24 +170,13 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 			},
 		},
 	}
-	if benchmarkSupportsBoundedDayEvents(rowCount) {
-		boundedDayEventsFrom := benchmarkBoundedDayEventsFrom(rowCount)
-		scenarios = append(scenarios, benchmarkReadScenario{
-			name:            "medium_events_scalar_bounded_24h_window",
-			eventFrom:       boundedDayEventsFrom,
-			eventTo:         eventsTo,
-			eventWindowRows: benchmarkBoundedDayEventsRows(rowCount),
-			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, boundedDayEventsFrom, eventsTo))
-			},
-			read: func(ctx context.Context) ([]storage.EventRecord, error) {
-				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, boundedDayEventsFrom, eventsTo))
-			},
-			check: func(b *testing.B, records []storage.EventRecord) {
-				assertBenchmarkScalarRows(b, records, key)
-			},
-		})
-	}
+	// Add only the bounded scalar windows that are still narrower than the
+	// current fixture. This keeps each benchmark branch semantically distinct
+	// from the unbounded wide-window scenario.
+	scenarios = append(
+		scenarios,
+		benchmarkBoundedScalarReadScenarios(key, rowCount, eventsTo, builder, reader)...,
+	)
 	scenarios = append(scenarios,
 		benchmarkReadScenario{
 			name:            "high_events_property_recent_window",
@@ -327,20 +338,12 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 			},
 		},
 	}
-	if benchmarkSupportsBoundedDayEvents(rowCount) {
-		// Keep the explain suite aligned with the benchmark suite so latency and
-		// EXPLAIN evidence describe the same distinct ClickHouse window shape.
-		boundedDayEventsFrom := benchmarkBoundedDayEventsFrom(rowCount)
-		scenarios = append(scenarios, benchmarkExplainScenario{
-			name:            "medium_events_scalar_bounded_24h_window",
-			eventFrom:       boundedDayEventsFrom,
-			eventTo:         eventsTo,
-			eventWindowRows: benchmarkBoundedDayEventsRows(rowCount),
-			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, boundedDayEventsFrom, eventsTo))
-			},
-		})
-	}
+	// Keep the explain suite aligned with the benchmark suite so latency and
+	// EXPLAIN evidence describe the same bounded scalar ClickHouse window shapes.
+	scenarios = append(
+		scenarios,
+		benchmarkBoundedScalarExplainScenarios(key, rowCount, eventsTo, builder)...,
+	)
 	scenarios = append(scenarios,
 		benchmarkExplainScenario{
 			name:            "high_events_property_recent_window",
@@ -437,22 +440,95 @@ func benchmarkRecentEventsFrom(rowCount int) time.Time {
 	return benchmarkBaseTime().Add(time.Duration(rowCount-benchmarkRecentEventsWindowRows) * time.Second)
 }
 
-// benchmarkSupportsBoundedDayEvents reports whether a bounded 24h slice stays
-// distinct from the wide-window benchmark fixture.
-func benchmarkSupportsBoundedDayEvents(rowCount int) bool {
-	return rowCount > benchmarkBoundedDayEventsWindowRows
+// benchmarkBoundedScalarReadScenarios expands the bounded scalar benchmark
+// suite for every window that still stays distinct from the current fixture.
+func benchmarkBoundedScalarReadScenarios(
+	key clickhouse.RoutingKey,
+	rowCount int,
+	eventsTo time.Time,
+	builder *clickhouse.EventQueryBuilder,
+	reader *clickhouse.EventReader,
+) []benchmarkReadScenario {
+	var scenarios []benchmarkReadScenario
+
+	// Build one scenario per bounded scalar window so the benchmark suite can
+	// compare 24h, multi-day, and week-long bounded scans without duplicating
+	// the surrounding EventReader harness.
+	for _, spec := range benchmarkBoundedScalarWindowSpecs {
+		if !benchmarkSupportsBoundedScalarWindow(rowCount, spec.windowRows) {
+			continue
+		}
+
+		boundedEventsFrom := benchmarkBoundedEventsFrom(rowCount, spec.windowRows)
+		scenarios = append(scenarios, benchmarkReadScenario{
+			name:            spec.name,
+			eventFrom:       boundedEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: benchmarkBoundedEventsRows(spec.windowRows),
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, boundedEventsFrom, eventsTo))
+			},
+			read: func(ctx context.Context) ([]storage.EventRecord, error) {
+				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, boundedEventsFrom, eventsTo))
+			},
+			check: func(b *testing.B, records []storage.EventRecord) {
+				assertBenchmarkScalarRows(b, records, key)
+			},
+		})
+	}
+
+	return scenarios
 }
 
-// benchmarkBoundedDayEventsFrom returns the lower bound for a bounded 24h
-// Events history slice when the seeded dataset is larger than one day.
-func benchmarkBoundedDayEventsFrom(rowCount int) time.Time {
-	return benchmarkBaseTime().Add(time.Duration(rowCount-benchmarkBoundedDayEventsWindowRows) * time.Second)
+// benchmarkBoundedScalarExplainScenarios mirrors the bounded scalar benchmark
+// suite so the explain output always refers to the same window shapes.
+func benchmarkBoundedScalarExplainScenarios(
+	key clickhouse.RoutingKey,
+	rowCount int,
+	eventsTo time.Time,
+	builder *clickhouse.EventQueryBuilder,
+) []benchmarkExplainScenario {
+	var scenarios []benchmarkExplainScenario
+
+	// Reuse the exact same window expansion rules as the timed benchmark. This
+	// avoids comparing latency from one bounded slice with EXPLAIN output from a
+	// different slice length.
+	for _, spec := range benchmarkBoundedScalarWindowSpecs {
+		if !benchmarkSupportsBoundedScalarWindow(rowCount, spec.windowRows) {
+			continue
+		}
+
+		boundedEventsFrom := benchmarkBoundedEventsFrom(rowCount, spec.windowRows)
+		scenarios = append(scenarios, benchmarkExplainScenario{
+			name:            spec.name,
+			eventFrom:       boundedEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: benchmarkBoundedEventsRows(spec.windowRows),
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, boundedEventsFrom, eventsTo))
+			},
+		})
+	}
+
+	return scenarios
 }
 
-// benchmarkBoundedDayEventsRows returns how many seeded rows fall inside the
-// bounded 24h Events history slice for the current fixture size.
-func benchmarkBoundedDayEventsRows(rowCount int) int {
-	return benchmarkBoundedDayEventsWindowRows
+// benchmarkSupportsBoundedScalarWindow reports whether the bounded slice stays
+// distinct from the wide-window benchmark fixture at the current row volume.
+func benchmarkSupportsBoundedScalarWindow(rowCount int, windowRows int) bool {
+	return rowCount > windowRows
+}
+
+// benchmarkBoundedEventsFrom returns the lower bound for one bounded Events
+// history slice when the seeded dataset is larger than that window.
+func benchmarkBoundedEventsFrom(rowCount int, windowRows int) time.Time {
+	return benchmarkBaseTime().Add(time.Duration(rowCount-windowRows) * time.Second)
+}
+
+// benchmarkBoundedEventsRows returns how many seeded rows belong to the
+// bounded Events history slice selected for the current benchmark scenario.
+func benchmarkBoundedEventsRows(windowRows int) int {
+	return windowRows
 }
 
 // benchmarkWideEventsFrom returns the lower bound used for wide Events scans.
