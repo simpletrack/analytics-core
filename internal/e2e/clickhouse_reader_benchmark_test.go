@@ -21,7 +21,32 @@ import (
 
 const clickHouseBenchmarkEnabledEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH"
 const clickHouseBenchmarkRowsEnv = "ANALYTICS_CORE_CLICKHOUSE_BENCH_ROWS"
-const benchmarkRecentEventsWindowRows = 5000 // benchmarkRecentEventsWindowRows keeps Events recent-window scenarios at 50 matching rows.
+const benchmarkRecentEventsWindowRows = 5000             // benchmarkRecentEventsWindowRows keeps Events recent-window scenarios at 50 matching rows.
+const benchmarkBoundedDayEventsWindowRows = 24 * 60 * 60 // benchmarkBoundedDayEventsWindowRows tracks one bounded 24h Events history slice.
+
+// benchmarkReadScenario captures one timed EventReader benchmark case.
+type benchmarkReadScenario struct {
+	name                 string                                                // name identifies the benchmark subcase and expected query pressure.
+	realtimeSince        time.Time                                             // realtimeSince marks the Realtime lower bound; zero means this is not a Realtime scenario.
+	realtimeEligibleRows int                                                   // realtimeEligibleRows records the expected rows ClickHouse can scan for Realtime.
+	eventFrom            time.Time                                             // eventFrom marks the Events lower bound; zero means this is not an Events scenario.
+	eventTo              time.Time                                             // eventTo marks the Events upper bound used by EventReader.
+	eventWindowRows      int                                                   // eventWindowRows records the expected seeded rows inside the Events window.
+	plan                 func(context.Context) (storage.EventQueryPlan, error) // plan builds the sealed SQL shape for optional preflight checks.
+	read                 func(context.Context) ([]storage.EventRecord, error)  // read executes the exact EventReader path being timed.
+	check                func(*testing.B, []storage.EventRecord)               // check verifies result semantics before and during timing.
+}
+
+// benchmarkExplainScenario captures one ClickHouse EXPLAIN case aligned with the benchmark suite.
+type benchmarkExplainScenario struct {
+	name                 string                                                // name identifies the explain subcase and expected query pressure.
+	realtimeSince        time.Time                                             // realtimeSince marks the Realtime lower bound; zero means this is not a Realtime scenario.
+	realtimeEligibleRows int                                                   // realtimeEligibleRows records the expected rows ClickHouse can scan for Realtime.
+	eventFrom            time.Time                                             // eventFrom marks the Events lower bound; zero means this is not an Events scenario.
+	eventTo              time.Time                                             // eventTo marks the Events upper bound used by EventReader.
+	eventWindowRows      int                                                   // eventWindowRows records the expected seeded rows inside the Events window.
+	plan                 func(context.Context) (storage.EventQueryPlan, error) // plan builds the sealed EventQueryPlan passed to ClickHouse EXPLAIN.
+}
 
 // BenchmarkEventReaderClickHouseExecution measures EventReader latency against
 // a real local ClickHouse instance and a seeded routed event table.
@@ -29,8 +54,8 @@ const benchmarkRecentEventsWindowRows = 5000 // benchmarkRecentEventsWindowRows 
 // The benchmark is opt-in because it depends on docker-compose ClickHouse. It
 // complements the builder-only benchmark by measuring actual GORM Raw execution
 // and ClickHouse read latency for recent-window Realtime, wide-since Realtime,
-// recent-window Events, wide-window Events, and high property-filtered Events
-// query shapes.
+// recent-window Events, bounded 24h scalar Events, wide-window Events, and
+// high property-filtered Events query shapes.
 func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	if os.Getenv(clickHouseBenchmarkEnabledEnv) != "1" {
 		b.Skipf("set %s=1 to run real ClickHouse EventReader benchmark", clickHouseBenchmarkEnabledEnv)
@@ -84,17 +109,7 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 	recentEventsFrom := benchmarkRecentEventsFrom(rowCount)
 	wideEventsFrom := benchmarkWideEventsFrom()
 	eventsTo := benchmarkEndTime(rowCount)
-	scenarios := []struct {
-		name                 string                                                // name identifies the benchmark subcase and expected query pressure.
-		realtimeSince        time.Time                                             // realtimeSince marks the Realtime lower bound; zero means this is not a Realtime scenario.
-		realtimeEligibleRows int                                                   // realtimeEligibleRows records the expected rows ClickHouse can scan for Realtime.
-		eventFrom            time.Time                                             // eventFrom marks the Events lower bound; zero means this is not an Events scenario.
-		eventTo              time.Time                                             // eventTo marks the Events upper bound used by EventReader.
-		eventWindowRows      int                                                   // eventWindowRows records the expected seeded rows inside the Events window.
-		plan                 func(context.Context) (storage.EventQueryPlan, error) // plan builds the sealed SQL shape for optional preflight checks.
-		read                 func(context.Context) ([]storage.EventRecord, error)  // read executes the exact EventReader path being timed.
-		check                func(*testing.B, []storage.EventRecord)               // check verifies result semantics before and during timing.
-	}{
+	scenarios := []benchmarkReadScenario{
 		{
 			name:                 "low_realtime_recent_window",
 			realtimeSince:        recentRealtimeSince,
@@ -132,22 +147,27 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 				assertBenchmarkScalarRows(b, records, key)
 			},
 		},
-		{
-			name:            "medium_events_scalar_wide_window",
-			eventFrom:       wideEventsFrom,
+	}
+	if benchmarkSupportsBoundedDayEvents(rowCount) {
+		boundedDayEventsFrom := benchmarkBoundedDayEventsFrom(rowCount)
+		scenarios = append(scenarios, benchmarkReadScenario{
+			name:            "medium_events_scalar_bounded_24h_window",
+			eventFrom:       boundedDayEventsFrom,
 			eventTo:         eventsTo,
-			eventWindowRows: rowCount,
+			eventWindowRows: benchmarkBoundedDayEventsRows(rowCount),
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, boundedDayEventsFrom, eventsTo))
 			},
 			read: func(ctx context.Context) ([]storage.EventRecord, error) {
-				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, boundedDayEventsFrom, eventsTo))
 			},
 			check: func(b *testing.B, records []storage.EventRecord) {
 				assertBenchmarkScalarRows(b, records, key)
 			},
-		},
-		{
+		})
+	}
+	scenarios = append(scenarios,
+		benchmarkReadScenario{
 			name:            "high_events_property_recent_window",
 			eventFrom:       recentEventsFrom,
 			eventTo:         eventsTo,
@@ -162,7 +182,22 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 				assertBenchmarkPropertyRows(b, records, key)
 			},
 		},
-		{
+		benchmarkReadScenario{
+			name:            "medium_events_scalar_wide_window",
+			eventFrom:       wideEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: rowCount,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+			},
+			read: func(ctx context.Context) ([]storage.EventRecord, error) {
+				return reader.ListEvents(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+			},
+			check: func(b *testing.B, records []storage.EventRecord) {
+				assertBenchmarkScalarRows(b, records, key)
+			},
+		},
+		benchmarkReadScenario{
 			name:            "high_events_property_wide_window",
 			eventFrom:       wideEventsFrom,
 			eventTo:         eventsTo,
@@ -177,7 +212,7 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 				assertBenchmarkPropertyRows(b, records, key)
 			},
 		},
-	}
+	)
 
 	// Phase 3: verify each scenario once, then time only EventReader execution.
 	for _, scenario := range scenarios {
@@ -265,15 +300,7 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 	recentEventsFrom := benchmarkRecentEventsFrom(rowCount)
 	wideEventsFrom := benchmarkWideEventsFrom()
 	eventsTo := benchmarkEndTime(rowCount)
-	scenarios := []struct {
-		name                 string                                                // name identifies the explain subcase and expected query pressure.
-		realtimeSince        time.Time                                             // realtimeSince marks the Realtime lower bound; zero means this is not a Realtime scenario.
-		realtimeEligibleRows int                                                   // realtimeEligibleRows records the expected rows ClickHouse can scan for Realtime.
-		eventFrom            time.Time                                             // eventFrom marks the Events lower bound; zero means this is not an Events scenario.
-		eventTo              time.Time                                             // eventTo marks the Events upper bound used by EventReader.
-		eventWindowRows      int                                                   // eventWindowRows records the expected seeded rows inside the Events window.
-		plan                 func(context.Context) (storage.EventQueryPlan, error) // plan builds the sealed EventQueryPlan passed to ClickHouse EXPLAIN.
-	}{
+	scenarios := []benchmarkExplainScenario{
 		{
 			name:                 "low_realtime_recent_window",
 			realtimeSince:        recentRealtimeSince,
@@ -299,16 +326,23 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, recentEventsFrom, eventsTo))
 			},
 		},
-		{
-			name:            "medium_events_scalar_wide_window",
-			eventFrom:       wideEventsFrom,
+	}
+	if benchmarkSupportsBoundedDayEvents(rowCount) {
+		// Keep the explain suite aligned with the benchmark suite so latency and
+		// EXPLAIN evidence describe the same distinct ClickHouse window shape.
+		boundedDayEventsFrom := benchmarkBoundedDayEventsFrom(rowCount)
+		scenarios = append(scenarios, benchmarkExplainScenario{
+			name:            "medium_events_scalar_bounded_24h_window",
+			eventFrom:       boundedDayEventsFrom,
 			eventTo:         eventsTo,
-			eventWindowRows: rowCount,
+			eventWindowRows: benchmarkBoundedDayEventsRows(rowCount),
 			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
-				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, boundedDayEventsFrom, eventsTo))
 			},
-		},
-		{
+		})
+	}
+	scenarios = append(scenarios,
+		benchmarkExplainScenario{
 			name:            "high_events_property_recent_window",
 			eventFrom:       recentEventsFrom,
 			eventTo:         eventsTo,
@@ -317,7 +351,16 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 				return builder.BuildEventsQuery(ctx, benchmarkPropertyEventsQuery(key, recentEventsFrom, eventsTo))
 			},
 		},
-		{
+		benchmarkExplainScenario{
+			name:            "medium_events_scalar_wide_window",
+			eventFrom:       wideEventsFrom,
+			eventTo:         eventsTo,
+			eventWindowRows: rowCount,
+			plan: func(ctx context.Context) (storage.EventQueryPlan, error) {
+				return builder.BuildEventsQuery(ctx, benchmarkScalarEventsQuery(key, wideEventsFrom, eventsTo))
+			},
+		},
+		benchmarkExplainScenario{
 			name:            "high_events_property_wide_window",
 			eventFrom:       wideEventsFrom,
 			eventTo:         eventsTo,
@@ -326,7 +369,7 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 				return builder.BuildEventsQuery(ctx, benchmarkPropertyEventsQuery(key, wideEventsFrom, eventsTo))
 			},
 		},
-	}
+	)
 
 	// Phase 3: log structured evidence and ClickHouse's index-aware explain
 	// output. The test fails if any scenario cannot be planned or explained.
@@ -394,6 +437,24 @@ func benchmarkRecentEventsFrom(rowCount int) time.Time {
 	return benchmarkBaseTime().Add(time.Duration(rowCount-benchmarkRecentEventsWindowRows) * time.Second)
 }
 
+// benchmarkSupportsBoundedDayEvents reports whether a bounded 24h slice stays
+// distinct from the wide-window benchmark fixture.
+func benchmarkSupportsBoundedDayEvents(rowCount int) bool {
+	return rowCount > benchmarkBoundedDayEventsWindowRows
+}
+
+// benchmarkBoundedDayEventsFrom returns the lower bound for a bounded 24h
+// Events history slice when the seeded dataset is larger than one day.
+func benchmarkBoundedDayEventsFrom(rowCount int) time.Time {
+	return benchmarkBaseTime().Add(time.Duration(rowCount-benchmarkBoundedDayEventsWindowRows) * time.Second)
+}
+
+// benchmarkBoundedDayEventsRows returns how many seeded rows fall inside the
+// bounded 24h Events history slice for the current fixture size.
+func benchmarkBoundedDayEventsRows(rowCount int) int {
+	return benchmarkBoundedDayEventsWindowRows
+}
+
 // benchmarkWideEventsFrom returns the lower bound used for wide Events scans.
 func benchmarkWideEventsFrom() time.Time {
 	return benchmarkBaseTime().Add(-time.Minute)
@@ -401,7 +462,10 @@ func benchmarkWideEventsFrom() time.Time {
 
 // benchmarkEndTime returns an exclusive upper bound after the newest fixture row.
 func benchmarkEndTime(rowCount int) time.Time {
-	return benchmarkBaseTime().Add(time.Duration(rowCount+1) * time.Second)
+	// Seeded rows occupy [baseTime, baseTime+(rowCount-1)s]. Using rowCount
+	// seconds keeps the upper bound exclusive while preserving exact window
+	// sizes in QueryEvidence, including the canonical 24h = 86400s slice.
+	return benchmarkBaseTime().Add(time.Duration(rowCount) * time.Second)
 }
 
 // benchmarkEligibleRows returns how many seeded events satisfy since.
