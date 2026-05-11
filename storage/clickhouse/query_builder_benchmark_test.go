@@ -24,8 +24,8 @@ func BenchmarkEventQueryBuilderReadSideShapes(b *testing.B) {
 	}
 	builder, err := NewEventQueryBuilder(router, WithAllowedPropertyFilters(
 		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
-		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "plan"},
-		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "tier"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "score"},
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "is_paid"},
 	))
 	if err != nil {
 		b.Fatalf("new event query builder failed: %v", err)
@@ -67,8 +67,8 @@ func BenchmarkEventQueryBuilderReadSideShapes(b *testing.B) {
 		},
 		PropertyFilters: []storage.EventPropertyFilter{
 			{Scope: storage.PropertyScopeEvent, Name: "button", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "hero"},
-			{Scope: storage.PropertyScopeEvent, Name: "plan", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "pro"},
-			{Scope: storage.PropertyScopeUser, Name: "tier", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "team"},
+			{Scope: storage.PropertyScopeUser, Name: "score", ValueType: storage.PropertyValueNumber, Operator: storage.EventFilterNotEquals, NumberValue: 42},
+			{Scope: storage.PropertyScopeEvent, Name: "is_paid", ValueType: storage.PropertyValueBool, Operator: storage.EventFilterEquals, BoolValue: true},
 		},
 	}
 
