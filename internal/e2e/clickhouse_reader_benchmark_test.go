@@ -114,8 +114,8 @@ func BenchmarkEventReaderClickHouseExecution(b *testing.B) {
 
 	builder, err := clickhouse.NewEventQueryBuilder(router, clickhouse.WithAllowedPropertyFilters(
 		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
-		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "plan"},
-		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "tier"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "score"},
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "is_paid"},
 	))
 	if err != nil {
 		b.Fatalf("new event query builder failed: %v", err)
@@ -298,8 +298,8 @@ func TestEventReaderClickHouseExplain(t *testing.T) {
 
 	builder, err := clickhouse.NewEventQueryBuilder(router, clickhouse.WithAllowedPropertyFilters(
 		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
-		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "plan"},
-		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "tier"},
+		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "score"},
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "is_paid"},
 	))
 	if err != nil {
 		t.Fatalf("new event query builder failed: %v", err)
@@ -632,8 +632,8 @@ func benchmarkPropertyEventsQuery(key clickhouse.RoutingKey, from time.Time, to 
 func benchmarkPropertyFilters() []storage.EventPropertyFilter {
 	return []storage.EventPropertyFilter{
 		{Scope: storage.PropertyScopeEvent, Name: "button", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "hero"},
-		{Scope: storage.PropertyScopeEvent, Name: "plan", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "pro"},
-		{Scope: storage.PropertyScopeUser, Name: "tier", ValueType: storage.PropertyValueString, Operator: storage.EventFilterEquals, StringValue: "team"},
+		{Scope: storage.PropertyScopeUser, Name: "score", ValueType: storage.PropertyValueNumber, Operator: storage.EventFilterNotEquals, NumberValue: 42},
+		{Scope: storage.PropertyScopeEvent, Name: "is_paid", ValueType: storage.PropertyValueBool, Operator: storage.EventFilterEquals, BoolValue: true},
 	}
 }
 
@@ -803,8 +803,8 @@ func seedBenchmarkEvents(ctx context.Context, tb testing.TB, conn driver.Conn, t
 			fmt.Sprintf("visit_%d", idx%25),
 			eventTime,
 			eventTime.Add(250*time.Millisecond),
-			`{"path":"/bench","button":"hero","plan":"pro"}`,
-			`{"tier":"team"}`,
+			`{"path":"/bench","button":"hero","is_paid":true}`,
+			`{"score":43.5}`,
 			"benchmark",
 		); err != nil {
 			_ = batch.Abort()
@@ -842,19 +842,21 @@ func seedBenchmarkProperties(ctx context.Context, tb testing.TB, conn driver.Con
 	}
 }
 
-// appendBenchmarkPropertyRows appends the event/user property triple for one event.
+// appendBenchmarkPropertyRows appends the event/user property rows for one event.
 func appendBenchmarkPropertyRows(tb testing.TB, batch driver.Batch, key clickhouse.RoutingKey, idx int, eventTime time.Time) {
 	tb.Helper()
 
 	values := []struct {
-		scope     storage.PropertyScope
-		name      string
-		valueType storage.PropertyValueType
-		value     string
+		scope       storage.PropertyScope     // scope separates event properties from user properties
+		name        string                    // name is the normalized property key used by the benchmark filter
+		valueType   storage.PropertyValueType // valueType selects which typed ClickHouse value column is populated
+		stringValue string                    // stringValue stores string property values
+		numberValue float64                   // numberValue stores numeric property values
+		boolValue   bool                      // boolValue stores boolean property values
 	}{
-		{scope: storage.PropertyScopeEvent, name: "button", valueType: storage.PropertyValueString, value: "hero"},
-		{scope: storage.PropertyScopeEvent, name: "plan", valueType: storage.PropertyValueString, value: "pro"},
-		{scope: storage.PropertyScopeUser, name: "tier", valueType: storage.PropertyValueString, value: "team"},
+		{scope: storage.PropertyScopeEvent, name: "button", valueType: storage.PropertyValueString, stringValue: "hero"},
+		{scope: storage.PropertyScopeUser, name: "score", valueType: storage.PropertyValueNumber, numberValue: 43.5},
+		{scope: storage.PropertyScopeEvent, name: "is_paid", valueType: storage.PropertyValueBool, boolValue: true},
 	}
 	for _, value := range values {
 		// Keep property row identity aligned with the seeded event row so tuple
@@ -875,9 +877,9 @@ func appendBenchmarkPropertyRows(tb testing.TB, batch driver.Batch, key clickhou
 			string(value.scope),
 			value.name,
 			string(value.valueType),
-			value.value,
-			0.0,
-			false,
+			value.stringValue,
+			value.numberValue,
+			value.boolValue,
 		); err != nil {
 			_ = batch.Abort()
 			tb.Fatalf("append property benchmark row failed: %v", err)
@@ -1056,8 +1058,8 @@ func assertBenchmarkPropertyRows(b *testing.B, records []storage.EventRecord, ke
 			"visitor_1",
 			"session_1",
 			"visit_1",
-			[]string{`"button":"hero"`, `"plan":"pro"`},
-			[]string{`"tier":"team"`},
+			[]string{`"button":"hero"`, `"is_paid":true`},
+			[]string{`"score":43.5`},
 		)
 		if record.SourceType == "server" {
 			b.Fatalf("source_type filter returned server row: %#v", record)
