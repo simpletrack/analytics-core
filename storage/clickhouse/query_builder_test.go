@@ -318,6 +318,7 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	builder, err := NewEventQueryBuilder(router, WithAllowedPropertyFilters(
 		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "button"},
 		storage.PropertySelector{Scope: storage.PropertyScopeUser, Name: "plan"},
+		storage.PropertySelector{Scope: storage.PropertyScopeEvent, Name: "is_paid"},
 	))
 	if err != nil {
 		t.Fatalf("new event query builder failed: %v", err)
@@ -325,6 +326,8 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	from := time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC)
 	to := from.Add(time.Hour)
 
+	// Build a property-filtered Events query that exercises each typed value
+	// column through the normal, always-run unit test path.
 	plan, err := builder.BuildEventsQuery(context.Background(), storage.EventListQuery{
 		TenantID:  "tenant_1",
 		ProjectID: "project_1",
@@ -346,12 +349,22 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 				Operator:    storage.EventFilterNotEquals,
 				StringValue: "free",
 			},
+			{
+				Scope:     storage.PropertyScopeEvent,
+				Name:      "is_paid",
+				ValueType: storage.PropertyValueBool,
+				Operator:  storage.EventFilterEquals,
+				BoolValue: true,
+			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("build events query failed: %v", err)
 	}
 
+	// Assert the SQL shape without accepting literal value interpolation; the
+	// typed bool branch must route through bool_value just like string filters
+	// route through string_value.
 	propertyTable := plan.PhysicalTable + propertyTableSuffix
 	for _, fragment := range []string{
 		"FROM `" + plan.PhysicalTable + "`",
@@ -360,6 +373,7 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 		"(tenant_id, project_id, source_id, event_id) IN (SELECT tenant_id, project_id, source_id, event_id FROM `" + propertyTable + "`",
 		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value = ?",
 		"property_scope = ? AND property_name = ? AND property_type = ? AND string_value != ?",
+		"property_scope = ? AND property_name = ? AND property_type = ? AND bool_value = ?",
 	} {
 		if !strings.Contains(plan.SQL, fragment) {
 			t.Fatalf("expected SQL fragment %q in %q", fragment, plan.SQL)
@@ -368,15 +382,17 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 	if strings.Contains(plan.SQL, "hero") || strings.Contains(plan.SQL, "free") {
 		t.Fatalf("property values should be bound args, not SQL literals: %s", plan.SQL)
 	}
-	if len(plan.Args) != 20 {
+	if len(plan.Args) != 27 {
 		t.Fatalf("expected tenant/project/source/property/property/limit args, got %d: %#v", len(plan.Args), plan.Args)
 	}
-	if plan.QueryEvidence().PropertyFilterCount != 2 {
-		t.Fatalf("expected 2 property evidence filters, got %d", plan.QueryEvidence().PropertyFilterCount)
+	if plan.QueryEvidence().PropertyFilterCount != 3 {
+		t.Fatalf("expected 3 property evidence filters, got %d", plan.QueryEvidence().PropertyFilterCount)
 	}
 	if !plan.QueryEvidence().UsesPropertyTable {
 		t.Fatal("expected property-filter query evidence to use property table")
 	}
+	// Evidence remains value-free even when the executable query binds string
+	// and bool values, so service responses can expose shape without secrets.
 	wantPropertyEvidence := []storage.EventPropertyFilterEvidence{
 		{
 			Scope:     storage.PropertyScopeEvent,
@@ -389,6 +405,12 @@ func TestEventQueryBuilderBuildsPropertyFilters(t *testing.T) {
 			Name:      "plan",
 			ValueType: storage.PropertyValueString,
 			Operator:  storage.EventFilterNotEquals,
+		},
+		{
+			Scope:     storage.PropertyScopeEvent,
+			Name:      "is_paid",
+			ValueType: storage.PropertyValueBool,
+			Operator:  storage.EventFilterEquals,
 		},
 	}
 	if !reflect.DeepEqual(plan.QueryEvidence().PropertyFilters, wantPropertyEvidence) {
