@@ -18,11 +18,11 @@ func TestBusPublishesToSubscriber(t *testing.T) {
 	defer cancel()
 
 	bus := direct.New()
-	received := make(chan contracts.EventEnvelope, 1)
+	received := make(chan eventbus.Message, 1)
 
 	go func() {
 		_ = bus.Subscribe(ctx, eventbus.ConsumerGroup{Name: "test", Consumer: "c1"}, func(_ context.Context, msg eventbus.Message) error {
-			received <- msg.Envelope
+			received <- msg
 			return nil
 		})
 	}()
@@ -46,8 +46,11 @@ func TestBusPublishesToSubscriber(t *testing.T) {
 
 	select {
 	case got := <-received:
-		if got.ID != envelope.ID {
-			t.Fatalf("expected event id %q, got %q", envelope.ID, got.ID)
+		if got.Envelope.ID != envelope.ID {
+			t.Fatalf("expected event id %q, got %q", envelope.ID, got.Envelope.ID)
+		}
+		if got.ID != "direct:1" {
+			t.Fatalf("expected provider delivery id direct:1, got %q", got.ID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("subscriber did not receive event")

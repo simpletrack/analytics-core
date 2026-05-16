@@ -2,7 +2,9 @@ package direct
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/simpletrack/analytics-core/contracts"
 	"github.com/simpletrack/analytics-core/eventbus"
@@ -12,6 +14,7 @@ import (
 type Bus struct {
 	mu       sync.RWMutex       // mu protects handler registration and publish snapshots
 	handlers []eventbus.Handler // handlers are synchronous in-process subscribers
+	sequence uint64             // sequence creates provider-native delivery IDs for demo messages
 }
 
 // New creates an in-process event bus.
@@ -27,10 +30,12 @@ func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) err
 	handlers := append([]eventbus.Handler(nil), b.handlers...)
 	b.mu.RUnlock()
 
-	// Direct has no broker-native delivery identity. It still fills the public
-	// metadata fields so tests exercise the same handler contract as real buses.
+	// Direct has no broker identity, so it creates a provider-native delivery ID
+	// distinct from Envelope.ID. Handlers must read msg.Envelope.ID for event
+	// identity and msg.ID only for queue delivery diagnostics.
+	deliveryID := fmt.Sprintf("direct:%d", atomic.AddUint64(&b.sequence, 1))
 	msg := eventbus.Message{
-		ID:       envelope.ID,
+		ID:       deliveryID,
 		Topic:    "direct",
 		Key:      envelope.ID,
 		Attempt:  1,

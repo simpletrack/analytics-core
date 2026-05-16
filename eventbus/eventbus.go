@@ -18,7 +18,7 @@ type ConsumerGroup struct {
 // provider that processing is complete; returning an error tells the provider
 // to retry, dead-letter, or hold queue progress according to backend rules.
 type Message struct {
-	ID        string                  // ID is the provider-native delivery identifier when available
+	ID        string                  // ID is the provider-native delivery identifier; event identity stays in Envelope.ID
 	Topic     string                  // Topic is the topic, stream, or channel that carried the message
 	Partition int32                   // Partition is the Kafka partition; non-partitioned providers leave it zero
 	Offset    int64                   // Offset is the Kafka offset; non-offset providers leave it zero
