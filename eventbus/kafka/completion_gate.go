@@ -7,14 +7,15 @@ import (
 
 // messageCompletionGate completes one Kafka offset after its own async work ends.
 type messageCompletionGate struct {
-	offset         int64
-	generationID   int32
-	committer      *partitionOrderedCommitter
-	tracker        *messageCompletionGateTracker
-	remainingTasks int32
-	completedOnce  sync.Once
+	offset         int64                         // offset is the Kafka offset guarded by this gate
+	generationID   int32                         // generationID rejects stale completion after rebalance
+	committer      *partitionOrderedCommitter    // committer advances ordered offset completion
+	tracker        *messageCompletionGateTracker // tracker reports aggregate gate pressure
+	remainingTasks int32                         // remainingTasks counts unfinished async work for this message
+	completedOnce  sync.Once                     // completedOnce makes completion idempotent across races
 }
 
+// newMessageCompletionGate creates one completion gate for a registered offset.
 func newMessageCompletionGate(offset int64, generationID int32, committer *partitionOrderedCommitter, tracker *messageCompletionGateTracker) *messageCompletionGate {
 	gate := &messageCompletionGate{offset: offset, generationID: generationID, committer: committer, tracker: tracker}
 	if tracker != nil {
@@ -58,6 +59,7 @@ func (g *messageCompletionGate) NoAsyncTaskCompleteNow() {
 	}
 }
 
+// complete marks the guarded offset eligible for ordered commit exactly once.
 func (g *messageCompletionGate) complete() {
 	// Completion is idempotent because handler success, malformed-message DLQ,
 	// and shutdown paths can race around the same offset.

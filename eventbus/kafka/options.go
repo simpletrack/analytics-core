@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	// Default option values keep local Kafka wiring explicit but operator-light.
 	defaultClientID        = "analytics-core-eventbus"
 	defaultTopic           = "analytics.events"
 	defaultDeadLetterTopic = "analytics.events.dead"

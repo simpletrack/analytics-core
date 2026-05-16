@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 )
 
+// errWorkerPoolClosed reports that handler work was rejected after shutdown began.
 var errWorkerPoolClosed = errors.New("kafka worker pool is closed")
 
 // workerPoolConfig configures the bounded handler execution pool.
@@ -31,6 +32,7 @@ type workerPoolStats struct {
 	Closed          bool    // Closed reports whether Close has started
 }
 
+// dynamicWorkerPool bounds concurrent handler execution for Kafka subscriptions.
 type dynamicWorkerPool struct {
 	name           string         // name identifies this pool in diagnostics
 	tasks          chan func()    // tasks is the bounded handler work queue

@@ -5,6 +5,7 @@ import (
 	"sync"
 )
 
+// commitState stores completion and mark state for one fetched Kafka offset.
 type commitState struct {
 	done         bool   // done records handler, retry, or DLQ completion for this offset
 	generationID int32  // generationID is the Sarama generation observed at registration time
@@ -13,16 +14,17 @@ type commitState struct {
 
 // partitionOrderedCommitter completes one Kafka topic-partition in offset order.
 type partitionOrderedCommitter struct {
-	mu                   sync.Mutex
-	initialized          bool
-	generationID         int32
-	nextOffset           int64
-	states               map[int64]*commitState
-	doneCount            int
-	lastRegisteredOffset int64
-	largestRegisterGap   int64
+	mu                   sync.Mutex             // mu protects all mutable commit state
+	initialized          bool                   // initialized reports whether nextOffset has been seeded
+	generationID         int32                  // generationID is the active Sarama generation for this partition
+	nextOffset           int64                  // nextOffset is the earliest offset that may still block commit progress
+	states               map[int64]*commitState // states stores offsets registered but not yet marked to Sarama
+	doneCount            int                    // doneCount counts completed offsets waiting behind nextOffset
+	lastRegisteredOffset int64                  // lastRegisteredOffset tracks observed fetch order for diagnostics
+	largestRegisterGap   int64                  // largestRegisterGap records the largest offset gap seen at registration
 }
 
+// newPartitionOrderedCommitter creates an empty ordered committer.
 func newPartitionOrderedCommitter() *partitionOrderedCommitter {
 	return &partitionOrderedCommitter{states: make(map[int64]*commitState)}
 }
@@ -97,6 +99,7 @@ func (c *partitionOrderedCommitter) Complete(offset int64, generationID int32) {
 	}
 }
 
+// resetLocked clears state after all offsets are marked or a generation changes.
 func (c *partitionOrderedCommitter) resetLocked() {
 	c.initialized = false
 	c.generationID = 0
@@ -109,9 +112,10 @@ func (c *partitionOrderedCommitter) resetLocked() {
 
 // orderedCommitManager owns ordered committers keyed by topic and partition.
 type orderedCommitManager struct {
-	committers sync.Map
+	committers sync.Map // committers stores *partitionOrderedCommitter values keyed by topic:partition
 }
 
+// newOrderedCommitManager creates the provider-wide committer registry.
 func newOrderedCommitManager() *orderedCommitManager {
 	return &orderedCommitManager{}
 }
@@ -150,6 +154,7 @@ type orderedCommitSnapshot struct {
 	LargestPendingGap   int64  // LargestPendingGap is the largest observed registration gap
 }
 
+// snapshot returns a diagnostic copy without exposing mutable commit state.
 func (c *partitionOrderedCommitter) snapshot() orderedCommitSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()

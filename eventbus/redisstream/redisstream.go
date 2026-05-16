@@ -106,6 +106,7 @@ func (b *Bus) Subscribe(ctx context.Context, group eventbus.ConsumerGroup, handl
 	}
 }
 
+// consume reads one Redis Stream batch and applies provider-owned ack semantics.
 func (b *Bus) consume(ctx context.Context, group eventbus.ConsumerGroup, id string, block time.Duration, handler eventbus.Handler) (int, error) {
 	// Read either pending work ("0") or fresh work (">") using the same
 	// handler contract so retry and DLQ behavior stays provider-owned.

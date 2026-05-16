@@ -21,10 +21,14 @@ func New() *Bus {
 
 // Publish synchronously delivers envelope to all registered handlers.
 func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) error {
+	// Snapshot handlers under the lock, then execute user callbacks without
+	// holding it so a slow demo handler cannot block future subscriptions.
 	b.mu.RLock()
 	handlers := append([]eventbus.Handler(nil), b.handlers...)
 	b.mu.RUnlock()
 
+	// Direct has no broker-native delivery identity. It still fills the public
+	// metadata fields so tests exercise the same handler contract as real buses.
 	msg := eventbus.Message{
 		ID:       envelope.ID,
 		Topic:    "direct",
@@ -33,6 +37,8 @@ func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) err
 		Envelope: envelope,
 	}
 
+	// Deliver synchronously because this provider is for tests and explicit
+	// single-process demos, not production ingestion backpressure.
 	for _, handler := range handlers {
 		if err := handler(ctx, msg); err != nil {
 			return err
@@ -43,6 +49,8 @@ func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) err
 
 // Subscribe registers handler until ctx is cancelled.
 func (b *Bus) Subscribe(ctx context.Context, _ eventbus.ConsumerGroup, handler eventbus.Handler) error {
+	// Registration is deliberately lightweight: direct subscribers live only
+	// until their caller cancels ctx, with no queue-owned retry or DLQ state.
 	b.mu.Lock()
 	b.handlers = append(b.handlers, handler)
 	b.mu.Unlock()

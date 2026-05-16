@@ -27,14 +27,14 @@ type consumerGroupFactory func([]string, string, *sarama.Config) (sarama.Consume
 
 // Bus implements eventbus.EventBus with Kafka producer and consumer groups.
 type Bus struct {
-	opts             Options              // opts stores normalized Kafka provider settings
-	producer         messageProducer      // producer publishes primary and dead-letter records
-	newConsumerGroup consumerGroupFactory // newConsumerGroup opens Sarama consumer groups
-	commits          *orderedCommitManager
-	gates            *messageCompletionGateTracker
-	protector        *consumptionProtector
-	pool             *dynamicWorkerPool
-	closeOnce        sync.Once
+	opts             Options                       // opts stores normalized Kafka provider settings
+	producer         messageProducer               // producer publishes primary and dead-letter records
+	newConsumerGroup consumerGroupFactory          // newConsumerGroup opens Sarama consumer groups
+	commits          *orderedCommitManager         // commits owns per-topic-partition ordered offset completion
+	gates            *messageCompletionGateTracker // gates reports per-message async completion pressure
+	protector        *consumptionProtector         // protector pauses/resumes Kafka claims under local pressure
+	pool             *dynamicWorkerPool            // pool bounds concurrent handler execution
+	closeOnce        sync.Once                     // closeOnce makes Close idempotent across shutdown paths
 }
 
 // New creates a Kafka EventBus backed by IBM Sarama.
@@ -59,6 +59,7 @@ func New(opts Options) (*Bus, error) {
 	return newBusWithDependencies(normalized, producer, sarama.NewConsumerGroup, pool), nil
 }
 
+// newBusWithDependencies wires testable provider dependencies behind Bus.
 func newBusWithDependencies(opts Options, producer messageProducer, factory consumerGroupFactory, pool *dynamicWorkerPool) *Bus {
 	return &Bus{
 		opts:             opts,
@@ -183,7 +184,7 @@ func newSaramaConfig(opts Options) *sarama.Config {
 	return config
 }
 
-// drainConsumerGroupErrors consumes Sarama's error channel to avoid producer-side backpressure.
+// drainConsumerGroupErrors consumes Sarama's error channel to avoid hidden consumer stalls.
 func drainConsumerGroupErrors(ctx context.Context, group sarama.ConsumerGroup) <-chan struct{} {
 	if group == nil {
 		return nil

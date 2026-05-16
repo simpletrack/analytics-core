@@ -3,11 +3,14 @@ package kafka
 import "sync"
 
 const (
+	// Default hard thresholds deliberately pause late. They are protection
+	// rails for local overload, not steady-state flow-control targets.
 	defaultHardPendingCount = 10000
 	defaultHardGateCount    = 10000
 	defaultHardQueueRatio   = 0.95
 )
 
+// pausableConsumerGroup is the Sarama pause/resume surface used by the protector.
 type pausableConsumerGroup interface {
 	// Pause stops fetching from the specified topic partitions.
 	Pause(map[string][]int32)
@@ -31,6 +34,7 @@ type consumptionProtector struct {
 	hardQueueRatio float64            // hardQueueRatio is the worker queue saturation threshold
 }
 
+// newConsumptionProtector creates the local pressure guard for Kafka consumers.
 func newConsumptionProtector() *consumptionProtector {
 	return &consumptionProtector{
 		paused:         make(map[string][]int32),
