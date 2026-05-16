@@ -27,10 +27,10 @@ func (b *Bus) Publish(ctx context.Context, envelope contracts.EventEnvelope) err
 
 	msg := eventbus.Message{
 		ID:       envelope.ID,
+		Topic:    "direct",
+		Key:      envelope.ID,
 		Attempt:  1,
 		Envelope: envelope,
-		Ack:      func(context.Context) error { return nil },
-		Nack:     func(context.Context, error) error { return nil },
 	}
 
 	for _, handler := range handlers {

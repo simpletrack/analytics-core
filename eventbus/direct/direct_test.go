@@ -23,7 +23,7 @@ func TestBusPublishesToSubscriber(t *testing.T) {
 	go func() {
 		_ = bus.Subscribe(ctx, eventbus.ConsumerGroup{Name: "test", Consumer: "c1"}, func(_ context.Context, msg eventbus.Message) error {
 			received <- msg.Envelope
-			return msg.Ack(ctx)
+			return nil
 		})
 	}()
 	time.Sleep(10 * time.Millisecond)

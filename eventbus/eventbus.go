@@ -12,16 +12,22 @@ type ConsumerGroup struct {
 	Consumer string // Consumer is the concrete consumer instance name inside the group
 }
 
-// Message wraps an event with queue metadata and acknowledgement hooks.
+// Message wraps an event with queue metadata.
+//
+// Handlers do not acknowledge messages directly. Returning nil tells the
+// provider that processing is complete; returning an error tells the provider
+// to retry, dead-letter, or hold queue progress according to backend rules.
 type Message struct {
-	ID       string                             // ID is the queue-native message identifier
-	Attempt  int                                // Attempt is the one-based delivery attempt observed by the adapter
-	Envelope contracts.EventEnvelope            // Envelope is the validated analytics event payload
-	Ack      func(context.Context) error        // Ack acknowledges successful processing
-	Nack     func(context.Context, error) error // Nack records failed processing
+	ID        string                  // ID is the provider-native delivery identifier when available
+	Topic     string                  // Topic is the topic, stream, or channel that carried the message
+	Partition int32                   // Partition is the Kafka partition; non-partitioned providers leave it zero
+	Offset    int64                   // Offset is the Kafka offset; non-offset providers leave it zero
+	Key       string                  // Key is the backend routing key when one is available
+	Attempt   int                     // Attempt is the one-based delivery attempt observed by the adapter
+	Envelope  contracts.EventEnvelope // Envelope is the validated analytics event payload
 }
 
-// Handler processes one event message. Returning nil means the message can be acknowledged.
+// Handler processes one event message. Returning nil marks the message complete.
 type Handler func(context.Context, Message) error
 
 // EventBus hides the concrete queue implementation from collect and ingestion.

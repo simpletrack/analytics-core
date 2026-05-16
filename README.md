@@ -16,8 +16,8 @@ upstream applications.
 - fasthttp collect route that accepts JSON events and keeps framework details outside the core handler.
 - EventBus abstraction.
 - Direct in-process bus for tests and local demos.
-- Redis Stream bus for the first deployable queue path.
-- Kafka adapter boundary reserved for high-throughput deployments.
+- Kafka EventBus provider for the production queue path.
+- Redis Stream bus for local, small-volume, and test queue paths.
 - Storage `EventWriter` boundary.
 - Storage-neutral typed property row expansion for event and user properties.
 - ClickHouse native property batch writer for typed property rows.
@@ -40,10 +40,11 @@ upstream applications.
 
 ## Queue Semantics
 
-- Consumers acknowledge messages only after storage writes succeed.
-- Failed messages stay pending and are retried before new messages are read.
-- Redis Stream attempts are read from consumer group pending metadata, not from local process memory.
-- `MaxAttempts` with `DeadLetterStream` moves exhausted messages to a dead-letter stream and acknowledges the original message.
+- EventBus handlers return success or error; concrete providers own retry, dead-letter, and commit semantics.
+- Kafka is the production provider. It publishes JSON `contracts.EventEnvelope` records, consumes with Sarama consumer groups, retries handler errors, writes exhausted messages to the configured DLQ topic, and marks offsets only through the per-partition ordered completion manager.
+- Kafka DLQ writes must succeed before the original offset can become complete. This keeps poison messages from disappearing from both the primary topic and the dead-letter topic.
+- Redis Stream remains useful for local, small-volume, and test deployments. It approximates the same retry and DLQ contract through consumer group pending metadata, but it is not the production semantic center.
+- Consumers acknowledge or mark messages only after storage writes, successful retry handling, or successful DLQ isolation.
 - Ingestion treats duplicate event writes as successful processing, so at-least-once delivery does not create duplicate stored events.
 - Property indexing has a second MySQL checkpoint because the event row may be committed before property rows fail.
 - Property indexing retries reclaim only explicit failed checkpoints; ambiguous processing checkpoints are not retried automatically because ClickHouse may already contain the property rows.
@@ -99,7 +100,7 @@ $env:GOPROXY='https://proxy.golang.org,direct'
 
 ## Local Runtime Dependencies
 
-Start Redis Stack, MySQL, and ClickHouse for integration work:
+Start Redis Stack, MySQL, ClickHouse, and single-node Kafka for integration work:
 
 ```powershell
 docker compose up -d
@@ -110,17 +111,25 @@ The compose file exposes:
 - Redis Stack: `localhost:26379`, RedisInsight: `http://localhost:28001`
 - MySQL: `localhost:23306`, database/user/password `analytics_core`
 - ClickHouse HTTP: `http://localhost:28123`, native TCP: `localhost:29000`, database/user/password `analytics_core`
+- Kafka plaintext broker: `127.0.0.1:29092`
 
 Ports can be overridden with `ANALYTICS_CORE_REDIS_PORT`,
 `ANALYTICS_CORE_REDIS_INSIGHT_PORT`, `ANALYTICS_CORE_MYSQL_PORT`,
-`ANALYTICS_CORE_CLICKHOUSE_HTTP_PORT`, and
-`ANALYTICS_CORE_CLICKHOUSE_NATIVE_PORT`.
+`ANALYTICS_CORE_CLICKHOUSE_HTTP_PORT`,
+`ANALYTICS_CORE_CLICKHOUSE_NATIVE_PORT`, and
+`ANALYTICS_CORE_KAFKA_PORT`.
 
 Run Redis Stream integration tests against the local Redis container:
 
 ```powershell
 $env:ANALYTICS_CORE_REDIS_ADDR='127.0.0.1:26379'
 go test ./eventbus/redisstream
+```
+
+Run Kafka provider unit tests without a live broker:
+
+```powershell
+go test ./eventbus/kafka
 ```
 
 Run the full P1 data-pipeline end-to-end test against Redis, MySQL, and ClickHouse:

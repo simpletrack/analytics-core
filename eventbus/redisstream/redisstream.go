@@ -107,6 +107,8 @@ func (b *Bus) Subscribe(ctx context.Context, group eventbus.ConsumerGroup, handl
 }
 
 func (b *Bus) consume(ctx context.Context, group eventbus.ConsumerGroup, id string, block time.Duration, handler eventbus.Handler) (int, error) {
+	// Read either pending work ("0") or fresh work (">") using the same
+	// handler contract so retry and DLQ behavior stays provider-owned.
 	streams, err := b.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    group.Name,
 		Consumer: group.Consumer,
@@ -124,18 +126,20 @@ func (b *Bus) consume(ctx context.Context, group eventbus.ConsumerGroup, id stri
 	processed := 0
 	for _, stream := range streams {
 		for _, message := range stream.Messages {
-			msg, err := b.decode(ctx, message, group)
+			// Decode once and pass stable queue metadata to the handler; Redis
+			// acknowledgement remains below this provider boundary.
+			msg, payload, err := b.decode(ctx, message, group)
 			if err != nil {
 				return processed, err
 			}
 			processed++
 			if err := handler(ctx, msg); err != nil {
-				if nackErr := msg.Nack(ctx, err); nackErr != nil {
+				if nackErr := b.handleFailure(ctx, group, message.ID, msg.Attempt, payload, err); nackErr != nil {
 					return processed, nackErr
 				}
 				continue
 			}
-			if err := msg.Ack(ctx); err != nil {
+			if err := b.client.XAck(ctx, b.opts.Stream, group.Name, message.ID).Err(); err != nil {
 				return processed, err
 			}
 		}
@@ -143,10 +147,11 @@ func (b *Bus) consume(ctx context.Context, group eventbus.ConsumerGroup, id stri
 	return processed, nil
 }
 
-func (b *Bus) decode(ctx context.Context, message redis.XMessage, group eventbus.ConsumerGroup) (eventbus.Message, error) {
+// decode converts a Redis Stream entry into the public EventBus message shape.
+func (b *Bus) decode(ctx context.Context, message redis.XMessage, group eventbus.ConsumerGroup) (eventbus.Message, []byte, error) {
 	raw, ok := message.Values[envelopeField]
 	if !ok {
-		return eventbus.Message{}, errors.New("redis stream message missing envelope")
+		return eventbus.Message{}, nil, errors.New("redis stream message missing envelope")
 	}
 
 	var payload []byte
@@ -156,41 +161,46 @@ func (b *Bus) decode(ctx context.Context, message redis.XMessage, group eventbus
 	case []byte:
 		payload = value
 	default:
-		return eventbus.Message{}, errors.New("redis stream envelope has unsupported type")
+		return eventbus.Message{}, nil, errors.New("redis stream envelope has unsupported type")
 	}
 
 	var envelope contracts.EventEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return eventbus.Message{}, err
+		return eventbus.Message{}, nil, err
 	}
 
 	attempt, err := b.deliveryAttempt(ctx, message.ID, group.Consumer, group.Name)
 	if err != nil {
-		return eventbus.Message{}, err
+		return eventbus.Message{}, nil, err
 	}
 
 	return eventbus.Message{
 		ID:       message.ID,
+		Topic:    b.opts.Stream,
+		Key:      envelope.ID,
 		Attempt:  attempt,
 		Envelope: envelope,
-		Ack: func(ctx context.Context) error {
-			return b.client.XAck(ctx, b.opts.Stream, group.Name, message.ID).Err()
-		},
-		Nack: func(ctx context.Context, cause error) error {
-			if b.opts.MaxAttempts <= 0 || attempt < b.opts.MaxAttempts || b.opts.DeadLetterStream == "" {
-				return nil
-			}
-			if err := b.deadLetter(ctx, group, message.ID, attempt, payload, cause); err != nil {
-				return err
-			}
-			if err := b.client.XAck(ctx, b.opts.Stream, group.Name, message.ID).Err(); err != nil {
-				return err
-			}
-			return nil
-		},
-	}, nil
+	}, payload, nil
 }
 
+// handleFailure either leaves a message pending for retry or moves it to DLQ.
+func (b *Bus) handleFailure(ctx context.Context, group eventbus.ConsumerGroup, messageID string, attempt int, payload []byte, cause error) error {
+	// Retryable Redis Stream failures stay pending. Subscribe always drains
+	// pending entries before reading new messages, so failed storage writes are
+	// retried before fresh work can outrun them.
+	if b.opts.MaxAttempts <= 0 || attempt < b.opts.MaxAttempts || b.opts.DeadLetterStream == "" {
+		return nil
+	}
+
+	// Dead-letter first, then acknowledge the original. If the diagnostic write
+	// fails, the original message remains pending and will be retried.
+	if err := b.deadLetter(ctx, group, messageID, attempt, payload, cause); err != nil {
+		return err
+	}
+	return b.client.XAck(ctx, b.opts.Stream, group.Name, messageID).Err()
+}
+
+// deadLetter writes one Redis Stream diagnostic message for an exhausted entry.
 func (b *Bus) deadLetter(ctx context.Context, group eventbus.ConsumerGroup, messageID string, attempt int, payload []byte, cause error) error {
 	_, err := b.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: b.opts.DeadLetterStream,
@@ -207,6 +217,7 @@ func (b *Bus) deadLetter(ctx context.Context, group eventbus.ConsumerGroup, mess
 	return err
 }
 
+// deliveryAttempt reads Redis pending metadata and returns a one-based attempt count.
 func (b *Bus) deliveryAttempt(ctx context.Context, messageID string, consumer string, group string) (int, error) {
 	pending, err := b.client.XPendingExt(ctx, &redis.XPendingExtArgs{
 		Stream:   b.opts.Stream,
@@ -228,6 +239,7 @@ func (b *Bus) deliveryAttempt(ctx context.Context, messageID string, consumer st
 	return int(pending[0].RetryCount), nil
 }
 
+// isBusyGroup reports whether Redis rejected group creation because it exists.
 func isBusyGroup(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "BUSYGROUP")
 }
