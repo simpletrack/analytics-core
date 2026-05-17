@@ -47,6 +47,155 @@ func TestPublishWritesJSONEnvelope(t *testing.T) {
 	}
 }
 
+func TestNewSaramaConfigUsesDurableProducerDefaults(t *testing.T) {
+	opts, err := Options{Brokers: []string{"127.0.0.1:9092"}}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if config.Producer.RequiredAcks != sarama.WaitForAll {
+		t.Fatalf("producer required acks = %v, want WaitForAll", config.Producer.RequiredAcks)
+	}
+	if config.Producer.Retry.Max != defaultProducerRetryMax {
+		t.Fatalf("producer retry max = %d, want %d", config.Producer.Retry.Max, defaultProducerRetryMax)
+	}
+	if config.Producer.Retry.Backoff != defaultProducerRetryBackoff {
+		t.Fatalf("producer retry backoff = %s, want %s", config.Producer.Retry.Backoff, defaultProducerRetryBackoff)
+	}
+	if !config.Producer.Return.Successes {
+		t.Fatal("sync producer requires returned successes")
+	}
+}
+
+func TestNewSaramaConfigMapsProducerReliabilityOptions(t *testing.T) {
+	opts, err := Options{
+		Brokers:                  []string{"127.0.0.1:9092"},
+		ProducerAcks:             ProducerAcksLeader,
+		ProducerRetryMax:         ptrInt(9),
+		ProducerRetryBackoff:     ptrDuration(750 * time.Millisecond),
+		ProducerFlushBytes:       1024,
+		ProducerFlushMessages:    10,
+		ProducerFlushFrequency:   time.Second,
+		ProducerFlushMaxMessages: 20,
+	}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if config.Producer.RequiredAcks != sarama.WaitForLocal {
+		t.Fatalf("producer required acks = %v, want WaitForLocal", config.Producer.RequiredAcks)
+	}
+	if config.Producer.Retry.Max != 9 || config.Producer.Retry.Backoff != 750*time.Millisecond {
+		t.Fatalf("unexpected retry config: max=%d backoff=%s", config.Producer.Retry.Max, config.Producer.Retry.Backoff)
+	}
+	if config.Producer.Flush.Bytes != 1024 || config.Producer.Flush.Messages != 10 || config.Producer.Flush.Frequency != time.Second || config.Producer.Flush.MaxMessages != 20 {
+		t.Fatalf("unexpected flush config: %+v", config.Producer.Flush)
+	}
+}
+
+func TestNewSaramaConfigPreservesExplicitZeroProducerRetryOptions(t *testing.T) {
+	opts, err := Options{
+		Brokers:              []string{"127.0.0.1:9092"},
+		ProducerRetryMax:     ptrInt(0),
+		ProducerRetryBackoff: ptrDuration(0),
+	}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if config.Producer.Retry.Max != 0 {
+		t.Fatalf("producer retry max = %d, want explicit zero", config.Producer.Retry.Max)
+	}
+	if config.Producer.Retry.Backoff != 0 {
+		t.Fatalf("producer retry backoff = %s, want explicit zero", config.Producer.Retry.Backoff)
+	}
+}
+
+func TestNewSaramaConfigMapsNoResponseProducerAcks(t *testing.T) {
+	opts, err := Options{Brokers: []string{"127.0.0.1:9092"}, ProducerAcks: ProducerAcksNone}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if config.Producer.RequiredAcks != sarama.NoResponse {
+		t.Fatalf("producer required acks = %v, want NoResponse", config.Producer.RequiredAcks)
+	}
+}
+
+func TestNewSaramaConfigEnablesIdempotenceWithRequiredSaramaLimits(t *testing.T) {
+	opts, err := Options{Brokers: []string{"127.0.0.1:9092"}, IdempotentProducer: true}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if !config.Producer.Idempotent {
+		t.Fatal("idempotent producer is disabled")
+	}
+	if config.Producer.RequiredAcks != sarama.WaitForAll {
+		t.Fatalf("producer required acks = %v, want WaitForAll", config.Producer.RequiredAcks)
+	}
+	if config.Net.MaxOpenRequests != 1 {
+		t.Fatalf("max open requests = %d, want 1", config.Net.MaxOpenRequests)
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("sarama config validate failed: %v", err)
+	}
+}
+
+func TestNewSaramaConfigKeepsDefaultInFlightLimitWithoutIdempotence(t *testing.T) {
+	opts, err := Options{Brokers: []string{"127.0.0.1:9092"}}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if config.Producer.Idempotent {
+		t.Fatal("idempotent producer is enabled by default")
+	}
+	if config.Net.MaxOpenRequests == 1 {
+		t.Fatal("max open requests was tightened without idempotent producer")
+	}
+}
+
+func TestNormalizeRejectsInvalidProducerReliabilityOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		opts Options
+	}{
+		{name: "unknown acks", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerAcks: ProducerAcks("quorum")}},
+		{name: "negative retry max", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerRetryMax: ptrInt(-1)}},
+		{name: "negative retry backoff", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerRetryBackoff: ptrDuration(-time.Nanosecond)}},
+		{name: "negative flush bytes", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerFlushBytes: -1}},
+		{name: "negative flush messages", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerFlushMessages: -1}},
+		{name: "negative flush frequency", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerFlushFrequency: -time.Nanosecond}},
+		{name: "negative flush max messages", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerFlushMaxMessages: -1}},
+		{name: "flush max below messages", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerFlushMessages: 10, ProducerFlushMaxMessages: 5}},
+		{name: "idempotent without all acks", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerAcks: ProducerAcksLeader, IdempotentProducer: true}},
+		{name: "idempotent without producer retry", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerRetryMax: ptrInt(0), IdempotentProducer: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.opts.normalize(); err == nil {
+				t.Fatal("normalize succeeded, want error")
+			}
+		})
+	}
+}
+
+func ptrInt(value int) *int {
+	return &value
+}
+
+func ptrDuration(value time.Duration) *time.Duration {
+	return &value
+}
+
 func TestProcessRetriesHandlerAndCompletesAfterSuccess(t *testing.T) {
 	producer := &recordingProducer{}
 	bus := newTestBus(t, producer)

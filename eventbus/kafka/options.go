@@ -8,14 +8,29 @@ import (
 
 const (
 	// Default option values keep local Kafka wiring explicit but operator-light.
-	defaultClientID        = "analytics-core-eventbus"
-	defaultTopic           = "analytics.events"
-	defaultDeadLetterTopic = "analytics.events.dead"
-	defaultMaxAttempts     = 5
-	defaultRetryBackoff    = 250 * time.Millisecond
-	defaultWorkers         = 100
-	defaultQueueSize       = 200
-	defaultCommitInterval  = time.Second
+	defaultClientID             = "analytics-core-eventbus"
+	defaultTopic                = "analytics.events"
+	defaultDeadLetterTopic      = "analytics.events.dead"
+	defaultMaxAttempts          = 5
+	defaultRetryBackoff         = 250 * time.Millisecond
+	defaultWorkers              = 100
+	defaultQueueSize            = 200
+	defaultCommitInterval       = time.Second
+	defaultProducerAcks         = ProducerAcksAll
+	defaultProducerRetryMax     = 5
+	defaultProducerRetryBackoff = 100 * time.Millisecond
+)
+
+// ProducerAcks names the producer acknowledgement level without exposing Sarama types.
+type ProducerAcks string
+
+const (
+	// ProducerAcksAll waits for all in-sync replicas before Publish reports success.
+	ProducerAcksAll ProducerAcks = "all"
+	// ProducerAcksLeader waits only for the partition leader acknowledgement.
+	ProducerAcksLeader ProducerAcks = "leader"
+	// ProducerAcksNone sends without waiting for broker acknowledgement.
+	ProducerAcksNone ProducerAcks = "none"
 )
 
 // Options configures the Kafka EventBus provider.
@@ -29,6 +44,15 @@ type Options struct {
 	Workers         int           // Workers is the fixed handler worker count
 	QueueSize       int           // QueueSize is the bounded handler work queue size
 	CommitInterval  time.Duration // CommitInterval is Sarama's auto-commit interval
+
+	ProducerAcks             ProducerAcks   // ProducerAcks controls broker acknowledgement durability for Publish
+	ProducerRetryMax         *int           // ProducerRetryMax overrides send retries; nil uses the durable default
+	ProducerRetryBackoff     *time.Duration // ProducerRetryBackoff overrides retry spacing; nil uses the durable default
+	ProducerFlushBytes       int            // ProducerFlushBytes is the best-effort flush byte threshold
+	ProducerFlushMessages    int            // ProducerFlushMessages is the best-effort flush message threshold
+	ProducerFlushFrequency   time.Duration  // ProducerFlushFrequency is the best-effort time-based flush threshold
+	ProducerFlushMaxMessages int            // ProducerFlushMaxMessages caps messages per broker request when positive
+	IdempotentProducer       bool           // IdempotentProducer enables broker idempotence and its stricter ordering limits
 }
 
 // normalize validates operator input and fills provider defaults.
@@ -74,6 +98,49 @@ func (o Options) normalize() (Options, error) {
 	}
 	if o.CommitInterval <= 0 {
 		o.CommitInterval = defaultCommitInterval
+	}
+	if o.ProducerAcks == "" {
+		o.ProducerAcks = defaultProducerAcks
+	}
+	switch o.ProducerAcks {
+	case ProducerAcksAll, ProducerAcksLeader, ProducerAcksNone:
+	default:
+		return Options{}, errors.New("kafka producer acks must be one of all, leader, or none")
+	}
+	if o.ProducerRetryMax == nil {
+		producerRetryMax := defaultProducerRetryMax
+		o.ProducerRetryMax = &producerRetryMax
+	}
+	if *o.ProducerRetryMax < 0 {
+		return Options{}, errors.New("kafka producer retry max must be >= 0")
+	}
+	if o.ProducerRetryBackoff == nil {
+		producerRetryBackoff := defaultProducerRetryBackoff
+		o.ProducerRetryBackoff = &producerRetryBackoff
+	}
+	if *o.ProducerRetryBackoff < 0 {
+		return Options{}, errors.New("kafka producer retry backoff must be >= 0")
+	}
+	if o.ProducerFlushBytes < 0 {
+		return Options{}, errors.New("kafka producer flush bytes must be >= 0")
+	}
+	if o.ProducerFlushMessages < 0 {
+		return Options{}, errors.New("kafka producer flush messages must be >= 0")
+	}
+	if o.ProducerFlushFrequency < 0 {
+		return Options{}, errors.New("kafka producer flush frequency must be >= 0")
+	}
+	if o.ProducerFlushMaxMessages < 0 {
+		return Options{}, errors.New("kafka producer flush max messages must be >= 0")
+	}
+	if o.ProducerFlushMaxMessages > 0 && o.ProducerFlushMessages > o.ProducerFlushMaxMessages {
+		return Options{}, errors.New("kafka producer flush max messages must be >= producer flush messages")
+	}
+	if o.IdempotentProducer && o.ProducerAcks != ProducerAcksAll {
+		return Options{}, errors.New("kafka idempotent producer requires producer acks all")
+	}
+	if o.IdempotentProducer && *o.ProducerRetryMax == 0 {
+		return Options{}, errors.New("kafka idempotent producer requires producer retry max >= 1")
 	}
 	return o, nil
 }

@@ -171,9 +171,21 @@ func newSaramaConfig(opts Options) *sarama.Config {
 	// Publish returns success to collect handlers.
 	config := sarama.NewConfig()
 	config.ClientID = opts.ClientID
-	config.Producer.RequiredAcks = sarama.WaitForLocal
+	config.Producer.RequiredAcks = saramaRequiredAcks(opts.ProducerAcks)
 	config.Producer.Return.Successes = true
-	config.Producer.Retry.Max = 3
+	config.Producer.Retry.Max = *opts.ProducerRetryMax
+	config.Producer.Retry.Backoff = *opts.ProducerRetryBackoff
+	config.Producer.Flush.Bytes = opts.ProducerFlushBytes
+	config.Producer.Flush.Messages = opts.ProducerFlushMessages
+	config.Producer.Flush.Frequency = opts.ProducerFlushFrequency
+	config.Producer.Flush.MaxMessages = opts.ProducerFlushMaxMessages
+	if opts.IdempotentProducer {
+		// Sarama requires a single in-flight request for idempotent writes. Keep
+		// this behind an explicit provider option because it can reduce throughput
+		// and changes broker ACL requirements through IdempotentWrite.
+		config.Producer.Idempotent = true
+		config.Net.MaxOpenRequests = 1
+	}
 
 	// Auto commit is intentionally left enabled. The ordered committer controls
 	// when MarkMessage is called; Sarama then flushes those marks on interval.
@@ -182,6 +194,18 @@ func newSaramaConfig(opts Options) *sarama.Config {
 	config.Consumer.Offsets.AutoCommit.Interval = opts.CommitInterval
 	config.Consumer.Return.Errors = true
 	return config
+}
+
+// saramaRequiredAcks converts public provider acknowledgement names to Sarama values.
+func saramaRequiredAcks(acks ProducerAcks) sarama.RequiredAcks {
+	switch acks {
+	case ProducerAcksNone:
+		return sarama.NoResponse
+	case ProducerAcksLeader:
+		return sarama.WaitForLocal
+	default:
+		return sarama.WaitForAll
+	}
 }
 
 // drainConsumerGroupErrors consumes Sarama's error channel to avoid hidden consumer stalls.
