@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -270,6 +271,56 @@ func TestKafkaReplicatedIntegrationPublishConsume(t *testing.T) {
 	}
 }
 
+func TestKafkaReplicatedIntegrationSurvivesBrokerOutage(t *testing.T) {
+	requireKafkaIntegration(t)
+	requireKafkaReplicatedIntegration(t)
+	requireKafkaOutageIntegration(t)
+	opts := newIntegrationOptions(t, "replicated-outage")
+	createIntegrationTopicWithDetail(t, opts, replicatedIntegrationTopicDetail(t))
+	stopKafkaOutageContainer(t)
+
+	bus, err := New(opts)
+	if err != nil {
+		t.Fatalf("new kafka bus after broker outage: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = bus.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	received := make(chan eventbus.Message, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, eventbus.ConsumerGroup{
+			Name:     "analytics-core-kafka-outage-" + integrationRunID(),
+			Consumer: "consumer-outage-1",
+		}, func(_ context.Context, message eventbus.Message) error {
+			received <- message
+			return nil
+		})
+	}()
+
+	if err := bus.Publish(ctx, contracts.EventEnvelope{ID: "evt_replicated_outage", EventName: "pageview"}); err != nil {
+		t.Fatalf("publish after broker outage: %v", err)
+	}
+	select {
+	case message := <-received:
+		if message.Envelope.ID != "evt_replicated_outage" || message.Topic != opts.Topic {
+			t.Fatalf("unexpected outage message %#v", message)
+		}
+	case err := <-done:
+		t.Fatalf("subscribe returned before outage message: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for outage kafka message: %v", ctx.Err())
+	}
+
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("subscribe shutdown: %v", err)
+	}
+}
+
 func TestKafkaIntegrationOptionsReadAuthenticatedBrokerEnv(t *testing.T) {
 	t.Setenv("ANALYTICS_CORE_KAFKA_TLS_ENABLED", "true")
 	t.Setenv("ANALYTICS_CORE_KAFKA_TLS_SERVER_NAME", "kafka.auth.local")
@@ -321,6 +372,17 @@ func requireKafkaReplicatedIntegration(t *testing.T) {
 
 	if os.Getenv("ANALYTICS_CORE_KAFKA_REPLICATED_INTEGRATION") != "1" {
 		t.Skip("set ANALYTICS_CORE_KAFKA_REPLICATED_INTEGRATION=1 to run replicated-topic Kafka integration tests")
+	}
+}
+
+func requireKafkaOutageIntegration(t *testing.T) {
+	t.Helper()
+
+	if os.Getenv("ANALYTICS_CORE_KAFKA_OUTAGE_INTEGRATION") != "1" {
+		t.Skip("set ANALYTICS_CORE_KAFKA_OUTAGE_INTEGRATION=1 to run broker-outage Kafka integration tests")
+	}
+	if strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_OUTAGE_STOP_CONTAINER")) == "" {
+		t.Skip("set ANALYTICS_CORE_KAFKA_OUTAGE_STOP_CONTAINER to the disposable broker container that this test may stop")
 	}
 }
 
@@ -527,6 +589,34 @@ func replicatedIntegrationTopicDetail(t integrationTestLogger) *sarama.TopicDeta
 		detail.ConfigEntries["min.insync.replicas"] = &minISR
 	}
 	return detail
+}
+
+func stopKafkaOutageContainer(t integrationTestLogger) {
+	t.Helper()
+
+	container := strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_OUTAGE_STOP_CONTAINER"))
+	if container == "" {
+		t.Fatalf("ANALYTICS_CORE_KAFKA_OUTAGE_STOP_CONTAINER is required")
+	}
+	// Stop only the explicitly named disposable container. Restart it during cleanup
+	// so a failed test does not leave the local drill cluster in a degraded state.
+	runDockerCommand(t, "stop", container)
+	t.Cleanup(func() {
+		runDockerCommand(t, "start", container)
+	})
+	time.Sleep(5 * time.Second)
+}
+
+func runDockerCommand(t integrationTestLogger, args ...string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "docker", args...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker %s failed: %v output=%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
 }
 
 // integrationTopicConfigEntries reads optional topic-level configs for integration topics.
