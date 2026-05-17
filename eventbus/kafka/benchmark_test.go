@@ -3,6 +3,8 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -61,6 +63,40 @@ func BenchmarkKafkaOrderedCommitterRegisterComplete(b *testing.B) {
 	}
 	if markCount != b.N {
 		b.Fatalf("marked offsets = %d, want %d", markCount, b.N)
+	}
+}
+
+// BenchmarkKafkaIntegrationPublish measures SyncProducer publish cost against a real broker.
+func BenchmarkKafkaIntegrationPublish(b *testing.B) {
+	if os.Getenv("ANALYTICS_CORE_KAFKA_BENCHMARK") != "1" {
+		b.Skip("set ANALYTICS_CORE_KAFKA_BENCHMARK=1 to run real-broker Kafka publish benchmark")
+	}
+	opts := newIntegrationOptions(b, "benchmark-publish")
+	createIntegrationTopic(b, opts)
+	bus, err := New(opts)
+	if err != nil {
+		b.Fatalf("new kafka bus: %v", err)
+	}
+	b.Cleanup(func() {
+		if err := bus.Close(); err != nil && !errors.Is(err, sarama.ErrClosedClient) {
+			b.Fatalf("close kafka bus: %v", err)
+		}
+	})
+	envelope := contracts.EventEnvelope{
+		TenantID:  "tenant_broker_bench",
+		ProjectID: "project_broker_bench",
+		SourceID:  "source_broker_bench",
+		EventName: "pageview",
+	}
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for idx := 0; idx < b.N; idx++ {
+		envelope.ID = "evt_broker_" + strconv.Itoa(idx)
+		if err := bus.Publish(ctx, envelope); err != nil {
+			b.Fatalf("publish to real broker failed: %v", err)
+		}
 	}
 }
 

@@ -2,8 +2,11 @@ package kafka
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +222,92 @@ func TestKafkaIntegrationUncommittedMessageReplaysAfterRestart(t *testing.T) {
 	}
 }
 
+func TestKafkaReplicatedIntegrationPublishConsume(t *testing.T) {
+	requireKafkaIntegration(t)
+	requireKafkaReplicatedIntegration(t)
+	opts := newIntegrationOptions(t, "replicated-publish-consume")
+	createIntegrationTopicWithDetail(t, opts, replicatedIntegrationTopicDetail(t))
+
+	bus, err := New(opts)
+	if err != nil {
+		t.Fatalf("new kafka bus: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = bus.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	received := make(chan eventbus.Message, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, eventbus.ConsumerGroup{
+			Name:     "analytics-core-kafka-replicated-" + integrationRunID(),
+			Consumer: "consumer-replicated-1",
+		}, func(_ context.Context, message eventbus.Message) error {
+			received <- message
+			return nil
+		})
+	}()
+
+	if err := bus.Publish(ctx, contracts.EventEnvelope{ID: "evt_replicated", EventName: "pageview"}); err != nil {
+		t.Fatalf("publish to replicated topic: %v", err)
+	}
+	select {
+	case message := <-received:
+		if message.Envelope.ID != "evt_replicated" || message.Topic != opts.Topic {
+			t.Fatalf("unexpected replicated topic message %#v", message)
+		}
+	case err := <-done:
+		t.Fatalf("subscribe returned before replicated topic message: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for replicated kafka message: %v", ctx.Err())
+	}
+
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("subscribe shutdown: %v", err)
+	}
+}
+
+func TestKafkaIntegrationOptionsReadAuthenticatedBrokerEnv(t *testing.T) {
+	t.Setenv("ANALYTICS_CORE_KAFKA_TLS_ENABLED", "true")
+	t.Setenv("ANALYTICS_CORE_KAFKA_TLS_SERVER_NAME", "kafka.auth.local")
+	t.Setenv("ANALYTICS_CORE_KAFKA_TLS_INSECURE_SKIP_VERIFY", "true")
+	t.Setenv("ANALYTICS_CORE_KAFKA_SASL_ENABLED", "true")
+	t.Setenv("ANALYTICS_CORE_KAFKA_SASL_MECHANISM", "plain")
+	t.Setenv("ANALYTICS_CORE_KAFKA_SASL_USERNAME", "simpletrack")
+	t.Setenv("ANALYTICS_CORE_KAFKA_SASL_PASSWORD", "secret")
+	t.Setenv("ANALYTICS_CORE_KAFKA_SASL_HANDSHAKE", "false")
+
+	opts := newIntegrationOptions(t, "auth-env")
+
+	if !opts.TLSEnabled || opts.TLSConfig == nil || opts.TLSConfig.ServerName != "kafka.auth.local" || !opts.TLSConfig.InsecureSkipVerify {
+		t.Fatalf("unexpected TLS integration options: %#v", opts.TLSConfig)
+	}
+	if !opts.SASLEnabled || opts.SASLMechanism != SASLMechanismPlain || opts.SASLUsername != "simpletrack" || opts.SASLPassword != "secret" {
+		t.Fatalf("unexpected SASL integration option mapping")
+	}
+	if opts.SASLHandshake == nil || *opts.SASLHandshake {
+		t.Fatalf("expected integration SASL handshake override to be false, got %#v", opts.SASLHandshake)
+	}
+}
+
+func TestKafkaIntegrationTopicDetailReadsProductionShape(t *testing.T) {
+	t.Setenv("ANALYTICS_CORE_KAFKA_TOPIC_PARTITIONS", "12")
+	t.Setenv("ANALYTICS_CORE_KAFKA_TOPIC_REPLICATION_FACTOR", "3")
+	t.Setenv("ANALYTICS_CORE_KAFKA_TOPIC_MIN_INSYNC_REPLICAS", "2")
+
+	detail := integrationTopicDetail(t)
+
+	if detail.NumPartitions != 12 || detail.ReplicationFactor != 3 {
+		t.Fatalf("unexpected integration topic detail: %#v", detail)
+	}
+	if detail.ConfigEntries == nil || detail.ConfigEntries["min.insync.replicas"] == nil || *detail.ConfigEntries["min.insync.replicas"] != "2" {
+		t.Fatalf("expected min.insync.replicas config entry, got %#v", detail.ConfigEntries)
+	}
+}
+
 func requireKafkaIntegration(t *testing.T) {
 	t.Helper()
 
@@ -227,9 +316,28 @@ func requireKafkaIntegration(t *testing.T) {
 	}
 }
 
-func newIntegrationOptions(t *testing.T, suffix string) Options {
+func requireKafkaReplicatedIntegration(t *testing.T) {
 	t.Helper()
 
+	if os.Getenv("ANALYTICS_CORE_KAFKA_REPLICATED_INTEGRATION") != "1" {
+		t.Skip("set ANALYTICS_CORE_KAFKA_REPLICATED_INTEGRATION=1 to run replicated-topic Kafka integration tests")
+	}
+}
+
+// integrationTestLogger is the shared helper surface implemented by testing.T and testing.B.
+type integrationTestLogger interface {
+	Helper()
+	Fatalf(string, ...any)
+	Cleanup(func())
+}
+
+// newIntegrationOptions builds provider options for gated real-broker tests and benchmarks.
+func newIntegrationOptions(t integrationTestLogger, suffix string) Options {
+	t.Helper()
+
+	tlsEnabled := integrationBoolEnv(t, "ANALYTICS_CORE_KAFKA_TLS_ENABLED", false)
+	tlsConfig := integrationTLSConfig(t, tlsEnabled)
+	saslHandshake := integrationBoolPtrEnv(t, "ANALYTICS_CORE_KAFKA_SASL_HANDSHAKE")
 	runID := integrationRunID()
 	opts, err := Options{
 		Brokers:         integrationBrokers(),
@@ -241,11 +349,59 @@ func newIntegrationOptions(t *testing.T, suffix string) Options {
 		Workers:         4,
 		QueueSize:       8,
 		CommitInterval:  50 * time.Millisecond,
+		TLSEnabled:      tlsEnabled,
+		TLSConfig:       tlsConfig,
+		SASLEnabled:     integrationBoolEnv(t, "ANALYTICS_CORE_KAFKA_SASL_ENABLED", false),
+		SASLMechanism:   SASLMechanism(strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_SASL_MECHANISM"))),
+		SASLUsername:    os.Getenv("ANALYTICS_CORE_KAFKA_SASL_USERNAME"),
+		SASLPassword:    os.Getenv("ANALYTICS_CORE_KAFKA_SASL_PASSWORD"),
+		SASLHandshake:   saslHandshake,
 	}.normalize()
 	if err != nil {
 		t.Fatalf("normalize kafka options: %v", err)
 	}
 	return opts
+}
+
+// integrationTLSConfig builds optional TLS material for authenticated Kafka drills.
+func integrationTLSConfig(t integrationTestLogger, enabled bool) *tls.Config {
+	t.Helper()
+
+	if !enabled {
+		return nil
+	}
+	config := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_TLS_SERVER_NAME")),
+		InsecureSkipVerify: integrationBoolEnv(t, "ANALYTICS_CORE_KAFKA_TLS_INSECURE_SKIP_VERIFY", false), //nolint:gosec // integration-test escape hatch for local throwaway brokers.
+	}
+	if caFile := strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_TLS_CA_FILE")); caFile != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			t.Fatalf("read Kafka integration CA file: %v", err)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			t.Fatalf("Kafka integration CA file %q does not contain PEM certificates", caFile)
+		}
+		config.RootCAs = pool
+	}
+	certFile := strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_TLS_CERT_FILE"))
+	keyFile := strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_TLS_KEY_FILE"))
+	if certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			t.Fatalf("Kafka integration client cert and key must be configured together")
+		}
+		certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			t.Fatalf("load Kafka integration client certificate: %v", err)
+		}
+		config.Certificates = []tls.Certificate{certificate}
+	}
+	return config
 }
 
 func integrationRunID() string {
@@ -315,7 +471,15 @@ func integrationBrokers() []string {
 	return brokers
 }
 
-func createIntegrationTopic(t *testing.T, opts Options) {
+// createIntegrationTopic creates a disposable topic for one integration run.
+func createIntegrationTopic(t integrationTestLogger, opts Options) {
+	t.Helper()
+
+	createIntegrationTopicWithDetail(t, opts, integrationTopicDetail(t))
+}
+
+// createIntegrationTopicWithDetail creates a disposable topic with explicit broker settings.
+func createIntegrationTopicWithDetail(t integrationTestLogger, opts Options, detail *sarama.TopicDetail) {
 	t.Helper()
 
 	admin, err := sarama.NewClusterAdmin(opts.Brokers, newSaramaConfig(opts))
@@ -327,11 +491,91 @@ func createIntegrationTopic(t *testing.T, opts Options) {
 		_ = admin.Close()
 	})
 
-	err = admin.CreateTopic(opts.Topic, &sarama.TopicDetail{
-		NumPartitions:     1,
-		ReplicationFactor: 1,
-	}, false)
+	err = admin.CreateTopic(opts.Topic, detail, false)
 	if err != nil && !errors.Is(err, sarama.ErrTopicAlreadyExists) {
 		t.Fatalf("create kafka topic %q: %v", opts.Topic, err)
 	}
+}
+
+// integrationTopicDetail reads topic shape overrides for single-broker drills.
+func integrationTopicDetail(t integrationTestLogger) *sarama.TopicDetail {
+	t.Helper()
+
+	return &sarama.TopicDetail{
+		NumPartitions:     int32(integrationIntEnv(t, "ANALYTICS_CORE_KAFKA_TOPIC_PARTITIONS", 1)),
+		ReplicationFactor: int16(integrationIntEnv(t, "ANALYTICS_CORE_KAFKA_TOPIC_REPLICATION_FACTOR", 1)),
+		ConfigEntries:     integrationTopicConfigEntries(),
+	}
+}
+
+// replicatedIntegrationTopicDetail enforces the production-shaped replicated topic minimums.
+func replicatedIntegrationTopicDetail(t integrationTestLogger) *sarama.TopicDetail {
+	t.Helper()
+
+	detail := integrationTopicDetail(t)
+	if detail.NumPartitions < 3 {
+		detail.NumPartitions = 3
+	}
+	if detail.ReplicationFactor < 3 {
+		detail.ReplicationFactor = 3
+	}
+	if detail.ConfigEntries == nil {
+		detail.ConfigEntries = map[string]*string{}
+	}
+	if _, ok := detail.ConfigEntries["min.insync.replicas"]; !ok {
+		minISR := "2"
+		detail.ConfigEntries["min.insync.replicas"] = &minISR
+	}
+	return detail
+}
+
+// integrationTopicConfigEntries reads optional topic-level configs for integration topics.
+func integrationTopicConfigEntries() map[string]*string {
+	minISR := strings.TrimSpace(os.Getenv("ANALYTICS_CORE_KAFKA_TOPIC_MIN_INSYNC_REPLICAS"))
+	if minISR == "" {
+		return nil
+	}
+	return map[string]*string{"min.insync.replicas": &minISR}
+}
+
+// integrationIntEnv reads a positive integer environment override for gated tests.
+func integrationIntEnv(t integrationTestLogger, key string, fallback int) int {
+	t.Helper()
+
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		t.Fatalf("%s must be a positive integer", key)
+	}
+	return value
+}
+
+// integrationBoolEnv reads a boolean environment override for gated tests.
+func integrationBoolEnv(t integrationTestLogger, key string, fallback bool) bool {
+	t.Helper()
+
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		t.Fatalf("%s must be a boolean", key)
+	}
+	return value
+}
+
+// integrationBoolPtrEnv reads an optional boolean environment override for provider pointers.
+func integrationBoolPtrEnv(t integrationTestLogger, key string) *bool {
+	t.Helper()
+
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	value := integrationBoolEnv(t, key, false)
+	return &value
 }
