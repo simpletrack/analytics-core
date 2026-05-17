@@ -81,3 +81,45 @@ func TestPartitionOrderedCommitterIgnoresStaleGenerationCompletion(t *testing.T)
 		t.Fatalf("unexpected generation-aware commit calls: %+v", calls)
 	}
 }
+
+func TestPartitionOrderedCommitterAbortGenerationDropsPendingOffsets(t *testing.T) {
+	committer := newPartitionOrderedCommitter()
+	calls := make([]int64, 0, 1)
+
+	committer.Register(100, 1, func() { calls = append(calls, 100) })
+	committer.Register(101, 1, func() { calls = append(calls, 101) })
+	committer.AbortGeneration(1)
+	committer.Complete(100, 1)
+	committer.Complete(101, 1)
+	if len(calls) != 0 {
+		t.Fatalf("committed aborted generation offsets: %+v", calls)
+	}
+
+	committer.Register(105, 2, func() { calls = append(calls, 105) })
+	snapshot := committer.snapshot()
+	if !snapshot.Initialized || snapshot.NextOffset != 105 || snapshot.PendingCount != 1 || snapshot.DoneCount != 0 {
+		t.Fatalf("unexpected snapshot after new generation register: %+v", snapshot)
+	}
+	committer.Complete(105, 2)
+	if len(calls) != 1 || calls[0] != 105 {
+		t.Fatalf("unexpected generation two commits: %+v", calls)
+	}
+}
+
+func TestPartitionOrderedCommitterGapBlocksLaterOffset(t *testing.T) {
+	committer := newPartitionOrderedCommitter()
+	calls := make([]int64, 0, 2)
+
+	committer.Register(10, 1, func() { calls = append(calls, 10) })
+	committer.Register(12, 1, func() { calls = append(calls, 12) })
+	committer.Complete(12, 1)
+	committer.Complete(10, 1)
+
+	if len(calls) != 1 || calls[0] != 10 {
+		t.Fatalf("unexpected commits across offset gap: %+v", calls)
+	}
+	snapshot := committer.snapshot()
+	if snapshot.PendingCount != 1 || snapshot.NextOffset != 11 || snapshot.LargestPendingGap != 2 {
+		t.Fatalf("unexpected gap snapshot: %+v", snapshot)
+	}
+}

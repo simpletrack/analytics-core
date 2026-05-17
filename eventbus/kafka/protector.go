@@ -1,6 +1,9 @@
 package kafka
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 const (
 	// Default hard thresholds deliberately pause late. They are protection
@@ -29,6 +32,7 @@ type consumptionSnapshot struct {
 type consumptionProtector struct {
 	mu             sync.Mutex         // mu protects paused partition state
 	paused         map[string][]int32 // paused records partitions currently paused by this protector
+	metrics        *kafkaMetrics      // metrics counts pause/resume transitions for diagnostics
 	hardPending    int                // hardPending is the pending-offset threshold
 	hardGate       int64              // hardGate is the gate/task threshold
 	hardQueueRatio float64            // hardQueueRatio is the worker queue saturation threshold
@@ -36,8 +40,14 @@ type consumptionProtector struct {
 
 // newConsumptionProtector creates the local pressure guard for Kafka consumers.
 func newConsumptionProtector() *consumptionProtector {
+	return newConsumptionProtectorWithMetrics(nil)
+}
+
+// newConsumptionProtectorWithMetrics creates the local pressure guard with counters.
+func newConsumptionProtectorWithMetrics(metrics *kafkaMetrics) *consumptionProtector {
 	return &consumptionProtector{
 		paused:         make(map[string][]int32),
+		metrics:        metrics,
 		hardPending:    defaultHardPendingCount,
 		hardGate:       defaultHardGateCount,
 		hardQueueRatio: defaultHardQueueRatio,
@@ -58,24 +68,57 @@ func (p *consumptionProtector) observe(group pausableConsumerGroup, snapshot con
 		if len(partitions) > 0 {
 			p.paused = partitions
 			group.Pause(copyPartitions(partitions))
+			p.trackPause()
 		}
 		return
 	}
 	if !pressure && len(p.paused) > 0 {
 		group.Resume(copyPartitions(p.paused))
 		p.paused = make(map[string][]int32)
+		p.trackResume()
 	}
 }
 
-// restore reapplies pause state after a Sarama rebalance.
-func (p *consumptionProtector) restore(group pausableConsumerGroup) {
+// reconcile reapplies or clears pause state after a Sarama rebalance.
+func (p *consumptionProtector) reconcile(group pausableConsumerGroup, snapshot consumptionSnapshot) {
 	if p == nil || group == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.paused) > 0 {
+	pressure := p.hasHardPressure(snapshot)
+	if pressure && len(p.paused) > 0 {
 		group.Pause(copyPartitions(p.paused))
+		return
+	}
+	if !pressure && len(p.paused) > 0 {
+		group.Resume(copyPartitions(p.paused))
+		p.paused = make(map[string][]int32)
+		p.trackResume()
+	}
+}
+
+// Snapshot returns the current pause map without exposing mutable state.
+func (p *consumptionProtector) Snapshot() map[string][]int32 {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return copyPartitions(p.paused)
+}
+
+// trackPause increments the provider pause transition counter.
+func (p *consumptionProtector) trackPause() {
+	if p.metrics != nil {
+		atomic.AddInt64(&p.metrics.pauseTransitionsTotal, 1)
+	}
+}
+
+// trackResume increments the provider resume transition counter.
+func (p *consumptionProtector) trackResume() {
+	if p.metrics != nil {
+		atomic.AddInt64(&p.metrics.resumeTransitionsTotal, 1)
 	}
 }
 

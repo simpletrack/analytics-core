@@ -2,8 +2,10 @@ package kafka
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,6 +164,41 @@ func TestNewSaramaConfigKeepsDefaultInFlightLimitWithoutIdempotence(t *testing.T
 	}
 }
 
+func TestNewSaramaConfigMapsTLSAndSASLPlain(t *testing.T) {
+	handshake := false
+	tlsConfig := &tls.Config{ServerName: "kafka.example.com", MinVersion: tls.VersionTLS12}
+	opts, err := Options{
+		Brokers:       []string{"127.0.0.1:9092"},
+		TLSEnabled:    true,
+		TLSConfig:     tlsConfig,
+		SASLEnabled:   true,
+		SASLMechanism: SASLMechanismPlain,
+		SASLUsername:  "eventbus-user",
+		SASLPassword:  "eventbus-password",
+		SASLHandshake: &handshake,
+	}.normalize()
+	if err != nil {
+		t.Fatalf("normalize options failed: %v", err)
+	}
+	config := newSaramaConfig(opts)
+
+	if !config.Net.TLS.Enable || config.Net.TLS.Config != tlsConfig {
+		t.Fatalf("unexpected TLS config: enabled=%v config=%p", config.Net.TLS.Enable, config.Net.TLS.Config)
+	}
+	if !config.Net.SASL.Enable {
+		t.Fatal("SASL is disabled")
+	}
+	if config.Net.SASL.Mechanism != sarama.SASLTypePlaintext {
+		t.Fatalf("SASL mechanism = %q, want %q", config.Net.SASL.Mechanism, sarama.SASLTypePlaintext)
+	}
+	if config.Net.SASL.User != "eventbus-user" || config.Net.SASL.Password != "eventbus-password" {
+		t.Fatalf("unexpected SASL credentials: user=%q password=%q", config.Net.SASL.User, config.Net.SASL.Password)
+	}
+	if config.Net.SASL.Handshake {
+		t.Fatal("SASL handshake override was not applied")
+	}
+}
+
 func TestNormalizeRejectsInvalidProducerReliabilityOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -177,6 +214,9 @@ func TestNormalizeRejectsInvalidProducerReliabilityOptions(t *testing.T) {
 		{name: "flush max below messages", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerFlushMessages: 10, ProducerFlushMaxMessages: 5}},
 		{name: "idempotent without all acks", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerAcks: ProducerAcksLeader, IdempotentProducer: true}},
 		{name: "idempotent without producer retry", opts: Options{Brokers: []string{"127.0.0.1:9092"}, ProducerRetryMax: ptrInt(0), IdempotentProducer: true}},
+		{name: "unsupported sasl mechanism", opts: Options{Brokers: []string{"127.0.0.1:9092"}, SASLEnabled: true, SASLMechanism: SASLMechanism("scram-sha-256"), SASLUsername: "user", SASLPassword: "password"}},
+		{name: "sasl missing username", opts: Options{Brokers: []string{"127.0.0.1:9092"}, SASLEnabled: true, SASLPassword: "password"}},
+		{name: "sasl missing password", opts: Options{Brokers: []string{"127.0.0.1:9092"}, SASLEnabled: true, SASLUsername: "user"}},
 	}
 
 	for _, tt := range tests {
@@ -320,6 +360,178 @@ func TestPublishDeadLetterIncludesQueueMetadata(t *testing.T) {
 	}
 }
 
+func TestStatsReportsRetryDLQLagAndPauseState(t *testing.T) {
+	producer := &recordingProducer{}
+	bus := newTestBus(t, producer)
+	bus.opts.MaxAttempts = 2
+	bus.opts.RetryBackoff = time.Nanosecond
+
+	committer := bus.commits.Get("analytics.events", 1)
+	committer.Register(10, 1, nil)
+	committer.Register(11, 1, nil)
+	bus.commits.RecordHighWaterMark("analytics.events", 1, 15)
+	bus.protector.observe(&fakeConsumerGroup{}, consumptionSnapshot{Commits: []orderedCommitSnapshot{
+		{Key: "analytics.events:1", PendingCount: defaultHardPendingCount},
+	}})
+	message := testConsumerMessage(t, "evt_stats")
+	message.Offset = 10
+	gate := newMessageCompletionGate(message.Offset, 1, committer, bus.gates)
+	bus.processConsumerMessageWithHandler(context.Background(), eventbus.ConsumerGroup{Name: "group", Consumer: "consumer"}, func(context.Context, eventbus.Message) error {
+		return errors.New("permanent failure")
+	}, message, gate)
+
+	stats := bus.Stats()
+	if stats.Topic != "analytics.events" || stats.DeadLetterTopic != "analytics.events.dead" {
+		t.Fatalf("unexpected stats topics: %#v", stats)
+	}
+	if stats.Metrics.HandlerFailureTotal != 2 || stats.Metrics.HandlerRetryTotal != 1 || stats.Metrics.DeadLetterSuccessTotal != 1 {
+		t.Fatalf("unexpected retry/DLQ metrics: %#v", stats.Metrics)
+	}
+	if stats.Metrics.PausedPartitions != 1 || stats.Metrics.PauseTransitionsTotal != 1 {
+		t.Fatalf("unexpected pause metrics: %#v paused=%#v", stats.Metrics, stats.Paused)
+	}
+	if len(stats.Commits) != 1 {
+		t.Fatalf("commit stats count = %d, want 1", len(stats.Commits))
+	}
+	commit := stats.Commits[0]
+	if commit.Topic != "analytics.events" || commit.Partition != 1 || commit.NextOffset != 11 || commit.HighWaterMarkOffset != 15 || commit.Lag != 4 {
+		t.Fatalf("unexpected commit stats: %#v", commit)
+	}
+	if stats.CompletionGate.CompletedMessages != 1 {
+		t.Fatalf("completed gates = %d, want 1", stats.CompletionGate.CompletedMessages)
+	}
+}
+
+func TestStatsReportsResumeTransition(t *testing.T) {
+	bus := newTestBus(t, &recordingProducer{})
+	group := &fakeConsumerGroup{}
+
+	bus.protector.observe(group, consumptionSnapshot{Commits: []orderedCommitSnapshot{
+		{Key: "analytics.events:1", PendingCount: defaultHardPendingCount},
+	}})
+	bus.protector.observe(group, consumptionSnapshot{})
+
+	stats := bus.Stats()
+	if stats.Metrics.PausedPartitions != 0 || len(stats.Paused) != 0 {
+		t.Fatalf("unexpected paused state after resume: metrics=%#v paused=%#v", stats.Metrics, stats.Paused)
+	}
+	if stats.Metrics.PauseTransitionsTotal != 1 || stats.Metrics.ResumeTransitionsTotal != 1 {
+		t.Fatalf("unexpected pause/resume counters: %#v", stats.Metrics)
+	}
+}
+
+func TestStatsReportsDLQWriteFailureWithoutCompletion(t *testing.T) {
+	producer := &recordingProducer{err: errors.New("kafka unavailable")}
+	bus := newTestBus(t, producer)
+	bus.opts.MaxAttempts = 1
+	bus.opts.RetryBackoff = time.Nanosecond
+	gate, completed := newRegisteredGate(60)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+
+	bus.processConsumerMessageWithHandler(ctx, eventbus.ConsumerGroup{Name: "g1", Consumer: "c1"}, func(context.Context, eventbus.Message) error {
+		return errors.New("permanent failure")
+	}, testConsumerMessage(t, "evt_stats_dlq_failed"), gate)
+
+	stats := bus.Stats()
+	if stats.Metrics.DeadLetterFailureTotal == 0 {
+		t.Fatalf("expected DLQ failure metric, got %#v", stats.Metrics)
+	}
+	if *completed != 0 || stats.CompletionGate.CompletedMessages != 0 {
+		t.Fatalf("message completed despite DLQ failure: completed=%d stats=%#v", *completed, stats.CompletionGate)
+	}
+}
+
+func TestConsumeClaimAbortsGenerationWhenClaimCloses(t *testing.T) {
+	producer := &recordingProducer{}
+	bus := newTestBus(t, producer)
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	adapter := &sessionAdapter{
+		bus:   bus,
+		group: eventbus.ConsumerGroup{Name: "group", Consumer: "consumer"},
+		handler: func(context.Context, eventbus.Message) error {
+			close(handlerStarted)
+			<-releaseHandler
+			return nil
+		},
+		consumerGroup: &fakeConsumerGroup{},
+	}
+	session := newFakeConsumerGroupSession(7)
+	claim := newFakeConsumerGroupClaim("analytics.events", 1, nil)
+
+	message := testConsumerMessage(t, "evt_claim_closed")
+	claim.messages <- message
+	close(claim.messages)
+	if err := adapter.ConsumeClaim(session, claim); err != nil {
+		t.Fatalf("consume claim failed: %v", err)
+	}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start before claim close")
+	}
+	if marked := session.markedOffsets(); len(marked) != 0 {
+		t.Fatalf("marked offsets after closed claim = %+v, want none", marked)
+	}
+
+	committer := bus.commits.Get(message.Topic, message.Partition)
+	committer.Complete(message.Offset, session.GenerationID())
+	close(releaseHandler)
+	waitForPoolStat(t, bus.pool, func(stats workerPoolStats) bool {
+		return stats.CompletedTotal == 1
+	})
+	if marked := session.markedOffsets(); len(marked) != 0 {
+		t.Fatalf("marked stale generation after claim close: %+v", marked)
+	}
+}
+
+func TestSessionAdapterSetupClearsStalePauseWithoutPressure(t *testing.T) {
+	producer := &recordingProducer{}
+	bus := newTestBus(t, producer)
+	group := &fakeConsumerGroup{}
+	adapter := &sessionAdapter{bus: bus, consumerGroup: group}
+
+	bus.protector.observe(group, consumptionSnapshot{Commits: []orderedCommitSnapshot{
+		{Key: "analytics.events:1", PendingCount: defaultHardPendingCount},
+	}})
+	bus.commits.Get("analytics.events", 1).AbortGeneration(0)
+	if err := adapter.Setup(newFakeConsumerGroupSession(1)); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	resumes := group.resumeSnapshots()
+	if len(resumes) != 1 || len(resumes[0]["analytics.events"]) != 1 || resumes[0]["analytics.events"][0] != 1 {
+		t.Fatalf("setup resumes = %+v, want analytics.events partition 1", resumes)
+	}
+	stats := bus.Stats()
+	if stats.Metrics.PausedPartitions != 0 || stats.Metrics.ResumeTransitionsTotal != 1 {
+		t.Fatalf("unexpected stats after stale pause clear: %#v", stats.Metrics)
+	}
+}
+
+func TestSessionAdapterSetupRestoresPauseWhenPressureRemains(t *testing.T) {
+	producer := &recordingProducer{}
+	bus := newTestBus(t, producer)
+	group := &fakeConsumerGroup{}
+	adapter := &sessionAdapter{bus: bus, consumerGroup: group}
+
+	committer := bus.commits.Get("analytics.events", 1)
+	for offset := int64(0); offset < defaultHardPendingCount; offset++ {
+		committer.Register(offset, 1, nil)
+	}
+	bus.protector.observe(group, bus.snapshot())
+	group.clear()
+	if err := adapter.Setup(newFakeConsumerGroupSession(1)); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	pauses := group.pauseSnapshots()
+	if len(pauses) != 1 || len(pauses[0]["analytics.events"]) != 1 || pauses[0]["analytics.events"][0] != 1 {
+		t.Fatalf("restored pauses = %+v, want analytics.events partition 1", pauses)
+	}
+}
+
 func newTestBus(t *testing.T, producer *recordingProducer) *Bus {
 	t.Helper()
 
@@ -375,4 +587,122 @@ func (p *recordingProducer) SendMessage(message *sarama.ProducerMessage) (int32,
 
 func (p *recordingProducer) Close() error {
 	return nil
+}
+
+type fakeConsumerGroupSession struct {
+	ctx          context.Context
+	generationID int32
+	mu           sync.Mutex
+	marked       []int64
+}
+
+func newFakeConsumerGroupSession(generationID int32) *fakeConsumerGroupSession {
+	return &fakeConsumerGroupSession{ctx: context.Background(), generationID: generationID}
+}
+
+func (s *fakeConsumerGroupSession) Claims() map[string][]int32 { return nil }
+
+func (s *fakeConsumerGroupSession) MemberID() string { return "member" }
+
+func (s *fakeConsumerGroupSession) GenerationID() int32 { return s.generationID }
+
+func (s *fakeConsumerGroupSession) MarkOffset(string, int32, int64, string) {}
+
+func (s *fakeConsumerGroupSession) Commit() {}
+
+func (s *fakeConsumerGroupSession) ResetOffset(string, int32, int64, string) {}
+
+func (s *fakeConsumerGroupSession) MarkMessage(message *sarama.ConsumerMessage, _ string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marked = append(s.marked, message.Offset)
+}
+
+func (s *fakeConsumerGroupSession) Context() context.Context { return s.ctx }
+
+func (s *fakeConsumerGroupSession) markedOffsets() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int64(nil), s.marked...)
+}
+
+type fakeConsumerGroupClaim struct {
+	topic     string
+	partition int32
+	messages  chan *sarama.ConsumerMessage
+}
+
+func newFakeConsumerGroupClaim(topic string, partition int32, messages []*sarama.ConsumerMessage) *fakeConsumerGroupClaim {
+	claim := &fakeConsumerGroupClaim{topic: topic, partition: partition, messages: make(chan *sarama.ConsumerMessage, len(messages)+1)}
+	for _, message := range messages {
+		claim.messages <- message
+	}
+	return claim
+}
+
+func (c *fakeConsumerGroupClaim) Topic() string { return c.topic }
+
+func (c *fakeConsumerGroupClaim) Partition() int32 { return c.partition }
+
+func (c *fakeConsumerGroupClaim) InitialOffset() int64 { return 0 }
+
+func (c *fakeConsumerGroupClaim) HighWaterMarkOffset() int64 { return 0 }
+
+func (c *fakeConsumerGroupClaim) Messages() <-chan *sarama.ConsumerMessage { return c.messages }
+
+type fakeConsumerGroup struct {
+	mu      sync.Mutex
+	pauses  []map[string][]int32
+	resumes []map[string][]int32
+}
+
+func (g *fakeConsumerGroup) Consume(context.Context, []string, sarama.ConsumerGroupHandler) error {
+	return nil
+}
+
+func (g *fakeConsumerGroup) Errors() <-chan error { return make(chan error) }
+
+func (g *fakeConsumerGroup) Close() error { return nil }
+
+func (g *fakeConsumerGroup) Pause(partitions map[string][]int32) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pauses = append(g.pauses, copyPartitions(partitions))
+}
+
+func (g *fakeConsumerGroup) Resume(partitions map[string][]int32) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.resumes = append(g.resumes, copyPartitions(partitions))
+}
+
+func (g *fakeConsumerGroup) PauseAll() {}
+
+func (g *fakeConsumerGroup) ResumeAll() {}
+
+func (g *fakeConsumerGroup) clear() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pauses = nil
+	g.resumes = nil
+}
+
+func (g *fakeConsumerGroup) pauseSnapshots() []map[string][]int32 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]map[string][]int32, 0, len(g.pauses))
+	for _, pause := range g.pauses {
+		out = append(out, copyPartitions(pause))
+	}
+	return out
+}
+
+func (g *fakeConsumerGroup) resumeSnapshots() []map[string][]int32 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]map[string][]int32, 0, len(g.resumes))
+	for _, resume := range g.resumes {
+		out = append(out, copyPartitions(resume))
+	}
+	return out
 }

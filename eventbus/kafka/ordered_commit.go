@@ -18,6 +18,7 @@ type partitionOrderedCommitter struct {
 	initialized          bool                   // initialized reports whether nextOffset has been seeded
 	generationID         int32                  // generationID is the active Sarama generation for this partition
 	nextOffset           int64                  // nextOffset is the earliest offset that may still block commit progress
+	highWaterMarkOffset  int64                  // highWaterMarkOffset is the latest Sarama claim high-water mark observed
 	states               map[int64]*commitState // states stores offsets registered but not yet marked to Sarama
 	doneCount            int                    // doneCount counts completed offsets waiting behind nextOffset
 	lastRegisteredOffset int64                  // lastRegisteredOffset tracks observed fetch order for diagnostics
@@ -99,11 +100,26 @@ func (c *partitionOrderedCommitter) Complete(offset int64, generationID int32) {
 	}
 }
 
+// AbortGeneration discards unfinished offsets from a closed Sarama generation.
+func (c *partitionOrderedCommitter) AbortGeneration(generationID int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.initialized || c.generationID != generationID {
+		return
+	}
+	// Once ConsumeClaim returns, Sarama owns the rebalance boundary and old
+	// session callbacks must not mark offsets. Unfinished messages remain
+	// replayable through Kafka because they never reach MarkMessage.
+	c.resetLocked()
+}
+
 // resetLocked clears state after all offsets are marked or a generation changes.
 func (c *partitionOrderedCommitter) resetLocked() {
 	c.initialized = false
 	c.generationID = 0
 	c.nextOffset = 0
+	c.highWaterMarkOffset = 0
 	c.states = make(map[int64]*commitState)
 	c.doneCount = 0
 	c.lastRegisteredOffset = 0
@@ -131,6 +147,14 @@ func (m *orderedCommitManager) Get(topic string, partition int32) *partitionOrde
 	return actual.(*partitionOrderedCommitter)
 }
 
+// RecordHighWaterMark stores the latest observed Kafka high-water mark for diagnostics.
+func (m *orderedCommitManager) RecordHighWaterMark(topic string, partition int32, highWaterMarkOffset int64) {
+	if highWaterMarkOffset <= 0 {
+		return
+	}
+	m.Get(topic, partition).RecordHighWaterMark(highWaterMarkOffset)
+}
+
 // Snapshots returns a diagnostic copy of every tracked topic-partition.
 func (m *orderedCommitManager) Snapshots() []orderedCommitSnapshot {
 	snapshots := make([]orderedCommitSnapshot, 0)
@@ -148,10 +172,20 @@ type orderedCommitSnapshot struct {
 	Key                 string // Key is topic:partition
 	Initialized         bool   // Initialized reports whether this partition has seen any offset
 	NextOffset          int64  // NextOffset is the earliest offset still blocking ordered completion
+	HighWaterMarkOffset int64  // HighWaterMarkOffset is the latest observed Kafka high-water mark
 	PendingCount        int    // PendingCount is the number of registered unmarked offsets
 	DoneCount           int    // DoneCount is the number of completed offsets waiting for earlier offsets
 	OldestPendingOffset int64  // OldestPendingOffset is the same value as NextOffset when pending exists
 	LargestPendingGap   int64  // LargestPendingGap is the largest observed registration gap
+}
+
+// RecordHighWaterMark updates diagnostic lag state for this partition.
+func (c *partitionOrderedCommitter) RecordHighWaterMark(highWaterMarkOffset int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if highWaterMarkOffset > c.highWaterMarkOffset {
+		c.highWaterMarkOffset = highWaterMarkOffset
+	}
 }
 
 // snapshot returns a diagnostic copy without exposing mutable commit state.
@@ -166,6 +200,7 @@ func (c *partitionOrderedCommitter) snapshot() orderedCommitSnapshot {
 	return orderedCommitSnapshot{
 		Initialized:         c.initialized,
 		NextOffset:          c.nextOffset,
+		HighWaterMarkOffset: c.highWaterMarkOffset,
 		PendingCount:        len(c.states),
 		DoneCount:           c.doneCount,
 		OldestPendingOffset: oldestPendingOffset,

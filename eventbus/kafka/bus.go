@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -34,7 +35,84 @@ type Bus struct {
 	gates            *messageCompletionGateTracker // gates reports per-message async completion pressure
 	protector        *consumptionProtector         // protector pauses/resumes Kafka claims under local pressure
 	pool             *dynamicWorkerPool            // pool bounds concurrent handler execution
+	metrics          kafkaMetrics                  // metrics stores provider-owned retry, DLQ, and delivery counters
 	closeOnce        sync.Once                     // closeOnce makes Close idempotent across shutdown paths
+}
+
+// Stats reports Kafka EventBus runtime state without exposing Sarama internals.
+//
+// NOTE: Stats is a diagnostic snapshot for operators and tests. It is not a
+// billing, audit, or exactly-once accounting surface.
+type Stats struct {
+	Topic           string               // Topic is the primary analytics event topic
+	DeadLetterTopic string               // DeadLetterTopic is the configured DLQ topic
+	WorkerPool      WorkerPoolStats      // WorkerPool reports bounded handler execution pressure
+	CompletionGate  CompletionGateStats  // CompletionGate reports in-flight message and task pressure
+	Commits         []OrderedCommitStats // Commits reports per topic-partition ordered commit state
+	Paused          map[string][]int32   // Paused lists partitions currently paused by local backpressure
+	Metrics         MetricsStats         // Metrics reports provider-owned delivery, retry, and DLQ counters
+}
+
+// WorkerPoolStats reports Kafka handler pool pressure.
+type WorkerPoolStats struct {
+	Name            string  // Name identifies this pool in diagnostics
+	GoroutinesTotal int     // GoroutinesTotal is runtime.NumGoroutine at sampling time
+	Queued          int64   // Queued is the current number of queued tasks
+	QueueCapacity   int     // QueueCapacity is the bounded work queue capacity
+	QueueUsageRatio float64 // QueueUsageRatio is Queued divided by QueueCapacity
+	Workers         int     // Workers is the fixed handler worker count
+	SubmittedTotal  int64   // SubmittedTotal is the lifetime accepted task count
+	CompletedTotal  int64   // CompletedTotal is the lifetime completed task count
+	RejectedTotal   int64   // RejectedTotal is the lifetime rejected task count
+	Closed          bool    // Closed reports whether shutdown has started
+}
+
+// CompletionGateStats reports message completion gate pressure.
+type CompletionGateStats struct {
+	InFlightMessages  int64 // InFlightMessages is the number of messages not yet completed
+	WaitingTasks      int64 // WaitingTasks is the number of unfinished async tasks
+	CompletedMessages int64 // CompletedMessages is the lifetime count of completed messages
+}
+
+// OrderedCommitStats reports one topic-partition's ordered commit state.
+type OrderedCommitStats struct {
+	Topic               string // Topic is the Kafka topic name
+	Partition           int32  // Partition is the Kafka partition id
+	Initialized         bool   // Initialized reports whether this partition has seen any offset
+	NextOffset          int64  // NextOffset is the earliest offset still blocking ordered completion
+	HighWaterMarkOffset int64  // HighWaterMarkOffset is the latest claim high-water mark observed from Sarama
+	Lag                 int64  // Lag estimates unprocessed records as HighWaterMarkOffset minus NextOffset
+	PendingCount        int    // PendingCount is the number of registered unmarked offsets
+	DoneCount           int    // DoneCount is the number of completed offsets waiting for earlier offsets
+	OldestPendingOffset int64  // OldestPendingOffset is the earliest registered offset still pending
+	LargestPendingGap   int64  // LargestPendingGap is the largest observed registration gap
+}
+
+// MetricsStats reports provider-owned Kafka delivery counters.
+type MetricsStats struct {
+	ConsumedTotal          int64 // ConsumedTotal counts primary topic records pulled from Kafka
+	HandlerSuccessTotal    int64 // HandlerSuccessTotal counts records completed through handler success
+	HandlerFailureTotal    int64 // HandlerFailureTotal counts failed handler attempts
+	HandlerRetryTotal      int64 // HandlerRetryTotal counts handler attempts scheduled after a previous failure
+	MalformedTotal         int64 // MalformedTotal counts records that could not decode as EventEnvelope
+	DeadLetterSuccessTotal int64 // DeadLetterSuccessTotal counts successful DLQ writes
+	DeadLetterFailureTotal int64 // DeadLetterFailureTotal counts failed DLQ write attempts
+	PausedPartitions       int64 // PausedPartitions counts currently paused topic-partitions
+	PauseTransitionsTotal  int64 // PauseTransitionsTotal counts protector pause transitions
+	ResumeTransitionsTotal int64 // ResumeTransitionsTotal counts protector resume transitions
+}
+
+// kafkaMetrics stores atomic counters for provider observability.
+type kafkaMetrics struct {
+	consumedTotal          int64 // consumedTotal counts messages fetched from Kafka
+	handlerSuccessTotal    int64 // handlerSuccessTotal counts handler success completions
+	handlerFailureTotal    int64 // handlerFailureTotal counts failed handler attempts
+	handlerRetryTotal      int64 // handlerRetryTotal counts retry scheduling decisions
+	malformedTotal         int64 // malformedTotal counts decode failures on the primary topic
+	deadLetterSuccessTotal int64 // deadLetterSuccessTotal counts successful DLQ publishes
+	deadLetterFailureTotal int64 // deadLetterFailureTotal counts failed DLQ publish attempts
+	pauseTransitionsTotal  int64 // pauseTransitionsTotal counts local pause transitions
+	resumeTransitionsTotal int64 // resumeTransitionsTotal counts local resume transitions
 }
 
 // New creates a Kafka EventBus backed by IBM Sarama.
@@ -61,15 +139,16 @@ func New(opts Options) (*Bus, error) {
 
 // newBusWithDependencies wires testable provider dependencies behind Bus.
 func newBusWithDependencies(opts Options, producer messageProducer, factory consumerGroupFactory, pool *dynamicWorkerPool) *Bus {
-	return &Bus{
+	bus := &Bus{
 		opts:             opts,
 		producer:         producer,
 		newConsumerGroup: factory,
 		commits:          newOrderedCommitManager(),
 		gates:            &messageCompletionGateTracker{},
-		protector:        newConsumptionProtector(),
 		pool:             pool,
 	}
+	bus.protector = newConsumptionProtectorWithMetrics(&bus.metrics)
+	return bus
 }
 
 // Publish appends envelope as JSON to the configured Kafka topic.
@@ -165,6 +244,26 @@ func (b *Bus) Close() error {
 	return err
 }
 
+// Stats returns a diagnostic snapshot of provider-owned Kafka state.
+func (b *Bus) Stats() Stats {
+	if b == nil {
+		return Stats{}
+	}
+	// Snapshot each internal subsystem before projecting into public structs so
+	// callers never receive mutable provider maps or Sarama-owned state.
+	snapshot := b.snapshot()
+	paused := b.protector.Snapshot()
+	return Stats{
+		Topic:           b.opts.Topic,
+		DeadLetterTopic: b.opts.DeadLetterTopic,
+		WorkerPool:      publicWorkerPoolStats(snapshot.Pool),
+		CompletionGate:  publicCompletionGateStats(snapshot.Gate),
+		Commits:         publicOrderedCommitStats(snapshot.Commits),
+		Paused:          paused,
+		Metrics:         b.publicMetricsStats(paused),
+	}
+}
+
 // newSaramaConfig maps provider options into Sarama's producer and consumer behavior.
 func newSaramaConfig(opts Options) *sarama.Config {
 	// Configure producer acknowledgements for durable broker acceptance before
@@ -179,6 +278,20 @@ func newSaramaConfig(opts Options) *sarama.Config {
 	config.Producer.Flush.Messages = opts.ProducerFlushMessages
 	config.Producer.Flush.Frequency = opts.ProducerFlushFrequency
 	config.Producer.Flush.MaxMessages = opts.ProducerFlushMaxMessages
+	config.Net.TLS.Enable = opts.TLSEnabled
+	config.Net.TLS.Config = opts.TLSConfig
+	if opts.SASLEnabled {
+		// SASL stays provider-owned just like sessions and offset commits. The
+		// public Options type exposes analytics-core names while Sarama's mechanism
+		// constants remain below this adapter boundary.
+		config.Net.SASL.Enable = true
+		config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+		config.Net.SASL.User = opts.SASLUsername
+		config.Net.SASL.Password = opts.SASLPassword
+		if opts.SASLHandshake != nil {
+			config.Net.SASL.Handshake = *opts.SASLHandshake
+		}
+	}
 	if opts.IdempotentProducer {
 		// Sarama requires a single in-flight request for idempotent writes. Keep
 		// this behind an explicit provider option because it can reduce throughput
@@ -252,7 +365,7 @@ type sessionAdapter struct {
 
 // Setup restores any provider-owned pause state after a Sarama rebalance.
 func (a *sessionAdapter) Setup(sarama.ConsumerGroupSession) error {
-	a.bus.protector.restore(a.consumerGroup)
+	a.bus.protector.reconcile(a.consumerGroup, a.bus.snapshot())
 	return nil
 }
 
@@ -264,6 +377,8 @@ func (a *sessionAdapter) Cleanup(sarama.ConsumerGroupSession) error {
 // ConsumeClaim registers offsets, schedules handler work, and gates ordered marks.
 func (a *sessionAdapter) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	committer := a.bus.commits.Get(claim.Topic(), claim.Partition())
+	generationID := session.GenerationID()
+	defer committer.AbortGeneration(generationID)
 	for {
 		select {
 		case <-session.Context().Done():
@@ -273,10 +388,12 @@ func (a *sessionAdapter) ConsumeClaim(session sarama.ConsumerGroupSession, claim
 				return nil
 			}
 			msg := message
-			committer.Register(msg.Offset, session.GenerationID(), func() {
+			a.bus.commits.RecordHighWaterMark(msg.Topic, msg.Partition, claim.HighWaterMarkOffset())
+			atomic.AddInt64(&a.bus.metrics.consumedTotal, 1)
+			committer.Register(msg.Offset, generationID, func() {
 				session.MarkMessage(msg, "")
 			})
-			gate := newMessageCompletionGate(msg.Offset, session.GenerationID(), committer, a.bus.gates)
+			gate := newMessageCompletionGate(msg.Offset, generationID, committer, a.bus.gates)
 
 			// Submit blocks behind the bounded queue, which is the first local
 			// backpressure layer before the protector escalates to Kafka pause.
@@ -300,6 +417,7 @@ func (b *Bus) processConsumerMessageWithHandler(ctx context.Context, group event
 	// the handler; they are isolated to DLQ under the provider contract.
 	var envelope contracts.EventEnvelope
 	if err := json.Unmarshal(message.Value, &envelope); err != nil {
+		atomic.AddInt64(&b.metrics.malformedTotal, 1)
 		if b.deadLetterUntilDone(ctx, group, message, 1, envelope, err, message.Value) {
 			gate.NoAsyncTaskCompleteNow()
 		}
@@ -328,9 +446,11 @@ func (b *Bus) processConsumerMessageWithHandler(ctx context.Context, group event
 			Envelope:  envelope,
 		})
 		if err == nil {
+			atomic.AddInt64(&b.metrics.handlerSuccessTotal, 1)
 			gate.TaskDone()
 			return
 		}
+		atomic.AddInt64(&b.metrics.handlerFailureTotal, 1)
 		if attempt >= b.opts.MaxAttempts {
 			// Exhausted messages become complete only after the DLQ publish has
 			// succeeded, preserving at-least-once visibility for poison records.
@@ -339,6 +459,7 @@ func (b *Bus) processConsumerMessageWithHandler(ctx context.Context, group event
 			}
 			return
 		}
+		atomic.AddInt64(&b.metrics.handlerRetryTotal, 1)
 		if !sleepContext(ctx, b.opts.RetryBackoff) {
 			return
 		}
@@ -365,8 +486,10 @@ func (b *Bus) deadLetterUntilDone(ctx context.Context, group eventbus.ConsumerGr
 		// complete until this write succeeds; otherwise the message replays after
 		// restart instead of disappearing from both primary and dead-letter topics.
 		if err := b.publishDeadLetter(ctx, group, message, attempt, envelope, cause, raw); err == nil {
+			atomic.AddInt64(&b.metrics.deadLetterSuccessTotal, 1)
 			return true
 		}
+		atomic.AddInt64(&b.metrics.deadLetterFailureTotal, 1)
 		if !sleepContext(ctx, b.opts.RetryBackoff) {
 			return false
 		}
@@ -425,6 +548,84 @@ func (b *Bus) snapshot() consumptionSnapshot {
 		Gate:    b.gates.Snapshot(),
 		Pool:    b.pool.Stats(),
 	}
+}
+
+// publicWorkerPoolStats projects internal worker stats into the public snapshot type.
+func publicWorkerPoolStats(stats workerPoolStats) WorkerPoolStats {
+	return WorkerPoolStats{
+		Name:            stats.Name,
+		GoroutinesTotal: stats.GoroutinesTotal,
+		Queued:          stats.Queued,
+		QueueCapacity:   stats.QueueCapacity,
+		QueueUsageRatio: stats.QueueUsageRatio,
+		Workers:         stats.Workers,
+		SubmittedTotal:  stats.SubmittedTotal,
+		CompletedTotal:  stats.CompletedTotal,
+		RejectedTotal:   stats.RejectedTotal,
+		Closed:          stats.Closed,
+	}
+}
+
+// publicCompletionGateStats projects internal gate stats into the public snapshot type.
+func publicCompletionGateStats(stats messageCompletionGateSnapshot) CompletionGateStats {
+	return CompletionGateStats{
+		InFlightMessages:  stats.InFlightMessages,
+		WaitingTasks:      stats.WaitingTasks,
+		CompletedMessages: stats.CompletedMessages,
+	}
+}
+
+// publicOrderedCommitStats projects ordered commit state into a stable diagnostic shape.
+func publicOrderedCommitStats(snapshots []orderedCommitSnapshot) []OrderedCommitStats {
+	stats := make([]OrderedCommitStats, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		topic, partition, ok := splitCommitKey(snapshot.Key)
+		if !ok {
+			continue
+		}
+		lag := int64(0)
+		if snapshot.HighWaterMarkOffset > snapshot.NextOffset {
+			lag = snapshot.HighWaterMarkOffset - snapshot.NextOffset
+		}
+		stats = append(stats, OrderedCommitStats{
+			Topic:               topic,
+			Partition:           partition,
+			Initialized:         snapshot.Initialized,
+			NextOffset:          snapshot.NextOffset,
+			HighWaterMarkOffset: snapshot.HighWaterMarkOffset,
+			Lag:                 lag,
+			PendingCount:        snapshot.PendingCount,
+			DoneCount:           snapshot.DoneCount,
+			OldestPendingOffset: snapshot.OldestPendingOffset,
+			LargestPendingGap:   snapshot.LargestPendingGap,
+		})
+	}
+	return stats
+}
+
+// publicMetricsStats reads atomic provider counters into the public snapshot type.
+func (b *Bus) publicMetricsStats(paused map[string][]int32) MetricsStats {
+	return MetricsStats{
+		ConsumedTotal:          atomic.LoadInt64(&b.metrics.consumedTotal),
+		HandlerSuccessTotal:    atomic.LoadInt64(&b.metrics.handlerSuccessTotal),
+		HandlerFailureTotal:    atomic.LoadInt64(&b.metrics.handlerFailureTotal),
+		HandlerRetryTotal:      atomic.LoadInt64(&b.metrics.handlerRetryTotal),
+		MalformedTotal:         atomic.LoadInt64(&b.metrics.malformedTotal),
+		DeadLetterSuccessTotal: atomic.LoadInt64(&b.metrics.deadLetterSuccessTotal),
+		DeadLetterFailureTotal: atomic.LoadInt64(&b.metrics.deadLetterFailureTotal),
+		PausedPartitions:       countPartitions(paused),
+		PauseTransitionsTotal:  atomic.LoadInt64(&b.metrics.pauseTransitionsTotal),
+		ResumeTransitionsTotal: atomic.LoadInt64(&b.metrics.resumeTransitionsTotal),
+	}
+}
+
+// countPartitions returns the total partition entries in a pause snapshot.
+func countPartitions(partitions map[string][]int32) int64 {
+	total := int64(0)
+	for _, values := range partitions {
+		total += int64(len(values))
+	}
+	return total
 }
 
 // sleepContext waits for duration unless ctx is cancelled first.

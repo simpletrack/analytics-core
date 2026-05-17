@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"crypto/tls"
 	"errors"
 	"strings"
 	"time"
@@ -33,6 +34,14 @@ const (
 	ProducerAcksNone ProducerAcks = "none"
 )
 
+// SASLMechanism names a supported Kafka SASL mechanism without exposing Sarama types.
+type SASLMechanism string
+
+const (
+	// SASLMechanismPlain uses username and password credentials with SASL/PLAIN.
+	SASLMechanismPlain SASLMechanism = "plain"
+)
+
 // Options configures the Kafka EventBus provider.
 type Options struct {
 	Brokers         []string      // Brokers are Kafka bootstrap broker addresses
@@ -53,6 +62,13 @@ type Options struct {
 	ProducerFlushFrequency   time.Duration  // ProducerFlushFrequency is the best-effort time-based flush threshold
 	ProducerFlushMaxMessages int            // ProducerFlushMaxMessages caps messages per broker request when positive
 	IdempotentProducer       bool           // IdempotentProducer enables broker idempotence and its stricter ordering limits
+	TLSEnabled               bool           // TLSEnabled enables TLS for broker connections
+	TLSConfig                *tls.Config    // TLSConfig customizes broker TLS validation when TLSEnabled is true
+	SASLEnabled              bool           // SASLEnabled enables broker authentication
+	SASLMechanism            SASLMechanism  // SASLMechanism selects the supported SASL flow
+	SASLUsername             string         // SASLUsername is the broker authentication identity
+	SASLPassword             string         // SASLPassword is the broker authentication secret
+	SASLHandshake            *bool          // SASLHandshake overrides Sarama's pre-auth handshake default when non-nil
 }
 
 // normalize validates operator input and fills provider defaults.
@@ -142,5 +158,31 @@ func (o Options) normalize() (Options, error) {
 	if o.IdempotentProducer && *o.ProducerRetryMax == 0 {
 		return Options{}, errors.New("kafka idempotent producer requires producer retry max >= 1")
 	}
+	o.SASLUsername = strings.TrimSpace(o.SASLUsername)
+	o.SASLMechanism = normalizeSASLMechanism(o.SASLMechanism)
+	if o.SASLEnabled {
+		if o.SASLMechanism == "" {
+			o.SASLMechanism = SASLMechanismPlain
+		}
+		if o.SASLMechanism != SASLMechanismPlain {
+			return Options{}, errors.New("kafka sasl mechanism must be plain in this version")
+		}
+		if o.SASLUsername == "" {
+			return Options{}, errors.New("kafka sasl username is required when sasl is enabled")
+		}
+		if o.SASLPassword == "" {
+			return Options{}, errors.New("kafka sasl password is required when sasl is enabled")
+		}
+	}
 	return o, nil
+}
+
+// normalizeSASLMechanism converts operator input into analytics-core mechanism names.
+func normalizeSASLMechanism(mechanism SASLMechanism) SASLMechanism {
+	switch strings.ToLower(strings.TrimSpace(string(mechanism))) {
+	case "", string(SASLMechanismPlain), "plaintext", "sasl_plaintext":
+		return SASLMechanismPlain
+	default:
+		return SASLMechanism(strings.ToLower(strings.TrimSpace(string(mechanism))))
+	}
 }

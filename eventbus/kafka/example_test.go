@@ -21,3 +21,18 @@ func ExampleOptions() {
 
 	// Output: analytics.events analytics.events.dead 5
 }
+
+func ExampleStats() {
+	stats := kafka.Stats{
+		Topic:           "analytics.events",
+		DeadLetterTopic: "analytics.events.dead",
+		Metrics: kafka.MetricsStats{
+			HandlerRetryTotal:      1,
+			DeadLetterSuccessTotal: 1,
+		},
+	}
+
+	fmt.Println(stats.Topic, stats.Metrics.HandlerRetryTotal, stats.Metrics.DeadLetterSuccessTotal)
+
+	// Output: analytics.events 1 1
+}
