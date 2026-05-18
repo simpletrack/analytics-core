@@ -3,7 +3,9 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"strings"
 
+	clickhouseproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/simpletrack/analytics-core/storage"
 	"gorm.io/gorm"
 )
@@ -128,6 +130,9 @@ func (r *EventReader) executePlan(ctx context.Context, plan storage.EventQueryPl
 	// Raw executes the already-built query plan; dynamic table names and filters
 	// cannot be changed here because they were sealed by EventQueryBuilder.
 	if err := r.db.WithContext(ctx).Raw(plan.SQL, plan.Args...).Scan(&rows).Error; err != nil {
+		if isMissingClickHouseTableError(err) {
+			return []storage.EventRecord{}, nil
+		}
 		return nil, err
 	}
 
@@ -146,12 +151,27 @@ func (r *EventReader) executeCountPlan(ctx context.Context, plan storage.EventQu
 	// Raw executes a sealed count plan. The count route is used by Goal P1, so
 	// it intentionally avoids scanning event rows just to compute a total.
 	if err := r.db.WithContext(ctx).Raw(plan.SQL, plan.Args...).Scan(&rows).Error; err != nil {
+		if isMissingClickHouseTableError(err) {
+			return 0, nil
+		}
 		return 0, err
 	}
 	if len(rows) == 0 {
 		return 0, nil
 	}
 	return rows[0].Count, nil
+}
+
+func isMissingClickHouseTableError(err error) bool {
+	var exception *clickhouseproto.Exception
+	if !errors.As(err, &exception) {
+		return false
+	}
+	if exception.Code != 60 {
+		return false
+	}
+	message := strings.ToLower(exception.Message)
+	return strings.Contains(message, "unknown table") || strings.Contains(message, "doesn't exist")
 }
 
 func (row eventRowModel) toRecord() storage.EventRecord {

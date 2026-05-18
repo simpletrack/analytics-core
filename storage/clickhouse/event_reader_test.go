@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	clickhouseproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/simpletrack/analytics-core/storage"
 	gormclickhouse "gorm.io/driver/clickhouse"
@@ -221,6 +222,102 @@ func TestEventReaderListEventsWithEvidenceReturnsPlanEvidence(t *testing.T) {
 	}
 	if result.Evidence.Optimization != storage.EventQueryOptimizationDirectFactTable {
 		t.Fatalf("expected direct fact-table evidence, got %#v", result.Evidence)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEventReaderListEventsTreatsMissingRoutedTableAsEmpty(t *testing.T) {
+	db, mock, cleanup := newMockClickHouseDB(t)
+	defer cleanup()
+
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+	reader, err := NewEventReader(db, builder)
+	if err != nil {
+		t.Fatalf("new event reader failed: %v", err)
+	}
+
+	query := storage.EventListQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		Limit:     10,
+	}
+	plan, err := builder.BuildEventsQuery(context.Background(), query)
+	if err != nil {
+		t.Fatalf("build expected plan failed: %v", err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(driverArgs(plan.Args)...).
+		WillReturnError(&clickhouseproto.Exception{
+			Code:    60,
+			Message: "Unknown table expression identifier 'events_deadbeef'",
+		})
+
+	records, err := reader.ListEvents(context.Background(), query)
+	if err != nil {
+		t.Fatalf("expected missing routed table to behave like empty results: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no records when routed table is missing, got %d", len(records))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEventReaderCountEventsTreatsMissingRoutedTableAsZero(t *testing.T) {
+	db, mock, cleanup := newMockClickHouseDB(t)
+	defer cleanup()
+
+	router, err := NewTableRouter("events")
+	if err != nil {
+		t.Fatalf("new table router failed: %v", err)
+	}
+	builder, err := NewEventQueryBuilder(router)
+	if err != nil {
+		t.Fatalf("new event query builder failed: %v", err)
+	}
+	reader, err := NewEventReader(db, builder)
+	if err != nil {
+		t.Fatalf("new event reader failed: %v", err)
+	}
+
+	query := storage.EventCountQuery{
+		TenantID:  "tenant_1",
+		ProjectID: "project_1",
+		SourceID:  "source_1",
+		EventName: "signup_started",
+		From:      time.Date(2026, 5, 1, 8, 0, 0, 0, time.UTC),
+		To:        time.Date(2026, 5, 2, 8, 0, 0, 0, time.UTC),
+	}
+	plan, err := builder.BuildEventCountQuery(context.Background(), query)
+	if err != nil {
+		t.Fatalf("build expected count plan failed: %v", err)
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(driverArgs(plan.Args)...).
+		WillReturnError(&clickhouseproto.Exception{
+			Code:    60,
+			Message: "Unknown table expression identifier 'events_deadbeef'",
+		})
+
+	count, err := reader.CountEvents(context.Background(), query)
+	if err != nil {
+		t.Fatalf("expected missing routed table to behave like zero count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected zero count when routed table is missing, got %d", count)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
